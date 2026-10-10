@@ -1,4 +1,5 @@
-.scanner/
+data/
+config.json
+run_daily.cmd
 __pycache__/
-*.py[cod]
-.DS_Store
+*.pyc

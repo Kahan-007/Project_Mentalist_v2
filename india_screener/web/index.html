@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Value Screener</title>
+<style>
+/* Sizes are in rem so one setting scales everything. Normal = 16.5px, i.e. 110% of the original 15px design. */
+html{font-size:16.5px}
+html[data-text=small]{font-size:15px}
+html[data-text=large]{font-size:18.75px}
+
+/* ---- themes: colours only; layout is shared ---- */
+:root,[data-theme=light]{--bg:#F4F8FD;--panel:#FFFFFF;--ink:#1A3350;--muted:#56697F;--line:#D5E2F0;--accent:#2E6DB4;--on-accent:#FFFFFF;
+--accent-soft:#E6F0FB;--nav-bg:#E6F0FB;--nav-hover:#D6E6F8;--input-bg:#FFFFFF;--input-line:#B9CCE0;--chip-bg:#E6EDF5;--soft-bg:#F3F7FC;
+--bar-bg:#E3ECF6;--gain:#1E7B45;--loss:#B42318;--buffett:#1E7B45;--munger:#2E6DB4;--lynch:#A4661A;--focus:#2E6DB4;
+--held:#C2610C;--held-bg:#FFEBD6;--buy:#1E7B45;--buy-bg:#DDF3E4;--sell:#B42318;--sell-bg:#FDE3E0;--watch-bg:#EEF2F7;
+--warn-bg:#FFF6E0;--warn-line:#EBCB84;--warn-ink:#8A5A00;--prog-bg:#FFF8D2;--prog-line:#E9CF6B;--stock-bg:#E3F0FF;--stock-line:#9CC3EE;
+--shadow:0 1px 2px rgba(26,51,80,.05)}
+[data-theme=dark]{--bg:#000000;--panel:#0E0E0E;--ink:#F2F2F2;--muted:#A9A9A9;--line:#2E2E2E;--accent:#F2F2F2;--on-accent:#000000;
+--accent-soft:#1A1A1A;--nav-bg:#080808;--nav-hover:#1F1F1F;--input-bg:#121212;--input-line:#4A4A4A;--chip-bg:#222222;--soft-bg:#141414;
+--bar-bg:#262626;--gain:#7BE0A4;--loss:#FF8C82;--buffett:#7BE0A4;--munger:#9CC8FF;--lynch:#F2C27A;--focus:#FFFFFF;
+--held:#FFB36B;--held-bg:#3A230E;--buy:#7BE0A4;--buy-bg:#0E2E1B;--sell:#FF8C82;--sell-bg:#3B1210;--watch-bg:#1E1E1E;
+--warn-bg:#2E2708;--warn-line:#6B5A12;--warn-ink:#F5D76E;--prog-bg:#2E2808;--prog-line:#8A7414;--stock-bg:#0C2238;--stock-line:#2F5F92;
+--shadow:none}
+[data-theme=green]{--bg:#000000;--panel:#030A04;--ink:#39FF6A;--muted:#22B04B;--line:#0E3A18;--accent:#39FF6A;--on-accent:#000000;
+--accent-soft:#05200C;--nav-bg:#020702;--nav-hover:#072A10;--input-bg:#010601;--input-line:#146B2A;--chip-bg:#05200C;--soft-bg:#020C04;
+--bar-bg:#062410;--gain:#39FF6A;--loss:#FF5F5F;--buffett:#39FF6A;--munger:#6FE3FF;--lynch:#FFD166;--focus:#39FF6A;
+--held:#FFB347;--held-bg:#2E1A05;--buy:#39FF6A;--buy-bg:#062A10;--sell:#FF5F5F;--sell-bg:#330808;--watch-bg:#041406;
+--warn-bg:#262206;--warn-line:#5E5210;--warn-ink:#FFE066;--prog-bg:#262206;--prog-line:#7A6A12;--stock-bg:#04203A;--stock-line:#1E5C8C;
+--shadow:none}
+[data-theme=green] body{font-family:"Cascadia Mono","Consolas",ui-monospace,monospace}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;font:1rem/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--bg);
+font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+.app{display:grid;grid-template-columns:15rem 1fr;min-height:100vh}
+[data-nav=collapsed] .app{grid-template-columns:4.2rem 1fr}
+
+/* ---- sidebar ---- */
+nav{background:var(--nav-bg);color:var(--ink);padding:1.2rem .7rem;display:flex;flex-direction:column;gap:.2rem;border-right:1px solid var(--line);
+position:sticky;top:0;height:100vh;overflow-y:auto}
+nav .brand{display:flex;align-items:center;justify-content:space-between;gap:.4rem;margin:0 .3rem 1rem}
+nav h1{font-size:1.133rem;margin:0;font-weight:650;color:var(--accent);white-space:nowrap}
+nav button{all:unset;cursor:pointer;padding:.55rem .7rem;border-radius:.45rem;color:var(--ink);display:flex;align-items:center;gap:.6rem;white-space:nowrap}
+nav button:hover{background:var(--nav-hover)}
+nav button[aria-current=page]{background:var(--accent);color:var(--on-accent)}
+nav .ico{width:1.4rem;text-align:center;flex:none}
+nav #navtoggle{padding:.3rem .5rem;font-size:1.1rem}
+[data-nav=collapsed] nav .lbl,[data-nav=collapsed] nav h1,[data-nav=collapsed] nav .run{display:none}
+[data-nav=collapsed] nav .brand{justify-content:center;margin:0 0 1rem}
+[data-nav=collapsed] nav button{justify-content:center;padding:.55rem .3rem}
+nav .run{margin-top:auto;font-size:.867rem;color:var(--muted);padding:.5rem .6rem;white-space:normal}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+
+/* ---- top-right toolbar ---- */
+.shell{min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:5;display:flex;justify-content:flex-end;align-items:center;gap:.5rem;padding:.55rem 2rem;
+background:var(--bg);border-bottom:1px solid var(--line)}
+.topbar select{padding:.3rem .5rem;font-size:.867rem}
+.topbar .tb{all:unset;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:2rem;
+padding:.3rem .8rem;display:inline-flex;align-items:center;gap:.35rem;font-size:.933rem}
+.topbar .tb:hover{border-color:var(--accent)}
+.topbar .help{width:2rem;height:2rem;padding:0;justify-content:center;font-weight:700;font-size:1.05rem}
+.badge{background:var(--sell);color:#fff;border-radius:1rem;padding:0 .45rem;font-size:.8rem;font-weight:700;min-width:1.2rem;text-align:center}
+.badge:empty{display:none}
+
+main{padding:1.6rem 2rem 3rem;max-width:88rem;width:100%}
+h2{font-size:1.6rem;font-weight:600;margin:0 0 .3rem}
+h3{font-size:1.067rem;margin:1.3rem 0 .5rem}
+p.lead{color:var(--muted);margin:0 0 1.2rem;max-width:75ch}
+section.box{background:var(--panel);border:1px solid var(--line);border-radius:.6rem;padding:1.1rem 1.2rem;margin-bottom:1.1rem;box-shadow:var(--shadow)}
+form.row,.row{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}
+label{display:flex;flex-direction:column;font-size:.867rem;color:var(--muted);gap:.2rem}
+input,select{font:inherit;padding:.4rem .6rem;border:1px solid var(--input-line);border-radius:.35rem;background:var(--input-bg);color:var(--ink);min-width:0}
+input[type=number]{width:8rem}
+button.btn{font:inherit;padding:.45rem .9rem;border-radius:.35rem;border:1px solid var(--accent);background:var(--accent);color:var(--on-accent);cursor:pointer}
+button.btn:hover{filter:brightness(.92)}
+button.btn.ghost{background:var(--panel);color:var(--accent)}
+button.btn.ghost:hover{background:var(--accent-soft);filter:none}
+button.btn:disabled{opacity:.45;cursor:default}
+button.link{all:unset;color:var(--accent);cursor:pointer;text-decoration:underline}
+summary{cursor:pointer;color:var(--accent);font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:.933rem}
+th,td{padding:.45rem .55rem;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child,td.l,th.l{text-align:left}
+th{font-weight:600;color:var(--muted);font-size:.867rem}
+tfoot td{font-weight:600;border-bottom:none}
+[title]:not(button):not(a):not(tr):not(td){cursor:help}
+.src{border-bottom:1px dotted var(--muted);cursor:help}
+.gain{color:var(--gain)}.loss{color:var(--loss)}.muted{color:var(--muted)}
+.scroll{overflow-x:auto}
+#status{position:fixed;bottom:1rem;right:1rem;max-width:30rem;padding:.6rem .9rem;border-radius:.45rem;background:var(--ink);color:var(--bg);
+display:none;font-size:.933rem;z-index:20}
+#status.err{background:var(--loss);color:#fff}
+.philos{display:grid;grid-template-columns:repeat(3,1fr);gap:.9rem}
+.phil{border-top:5px solid var(--c);background:var(--panel);border-radius:0 0 .6rem .6rem;padding:.9rem 1rem;border-left:1px solid var(--line);
+border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.phil .big{font-size:2.667rem;font-weight:650;line-height:1;color:var(--c)}
+.phil .bar{height:.55rem;background:var(--bar-bg);border-radius:.3rem;margin:.6rem 0 .25rem;position:relative;overflow:hidden}
+.phil .bar i{position:absolute;inset:0 auto 0 0;background:var(--c)}
+.phil .pass{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink)}
+.crit td{font-size:.867rem;white-space:normal}
+.chip{display:inline-block;padding:0 .55rem;border-radius:.7rem;font-size:.8rem;background:var(--chip-bg);margin-right:.25rem}
+.chip.b{color:var(--buffett)}.chip.m{color:var(--munger)}.chip.y{color:var(--lynch)}
+.chip.all{background:var(--accent);color:var(--on-accent)}
+.chip.warnchip{background:var(--warn-bg);color:var(--warn-ink)}
+.sig{display:inline-block;padding:.05rem .65rem;border-radius:.7rem;font-size:.8rem;font-weight:600;margin-right:.25rem}
+.sig.hold{background:var(--held-bg);color:var(--held)}.sig.buy{background:var(--buy-bg);color:var(--buy)}
+.sig.sell{background:var(--sell-bg);color:var(--sell)}.sig.watch{background:var(--watch-bg);color:var(--muted)}
+tr.sig-hold td:first-child{box-shadow:inset 5px 0 0 var(--held)}tr.sig-buy td:first-child{box-shadow:inset 5px 0 0 var(--buy)}
+tr.sig-sell td:first-child{box-shadow:inset 5px 0 0 var(--sell)}
+.legend{display:flex;gap:1rem;flex-wrap:wrap;font-size:.867rem;color:var(--muted);margin:.25rem 0 .7rem}
+.warn{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--ink);padding:.5rem .75rem;border-radius:.45rem;margin:.5rem 0;font-size:.933rem}
+pre{white-space:pre-wrap;font-size:.867rem;background:var(--soft-bg);padding:.8rem;border-radius:.45rem;max-height:30rem;overflow:auto;color:var(--ink)}
+ul.news{padding-left:1.2rem}ul.news li{margin-bottom:.35rem}
+.spark{width:100%;height:6rem}
+.progress{height:.65rem;background:var(--bar-bg);border-radius:.35rem;overflow:hidden;margin:.35rem 0 .1rem}
+.progress i{display:block;height:100%;background:var(--accent)}
+.checks li{margin:.2rem 0;font-size:.933rem}.st-ok{color:var(--gain)}.st-warn{color:var(--warn-ink)}.st-fail{color:var(--loss)}.st-skip{color:var(--muted)}
+.ess{font-size:.733rem;border:1px solid currentColor;border-radius:.2rem;padding:0 .3rem;margin-left:.25rem;color:var(--muted)}
+.ess.bad{color:var(--loss)}
+.flags td{color:var(--muted)}
+.filters{display:flex;gap:.6rem;flex-wrap:wrap;margin:.6rem 0}
+.imp-log{max-height:20rem;overflow:auto;font-size:.933rem;margin-top:.6rem}
+.imp-log div{padding:.2rem 0;border-bottom:1px solid var(--line)}
+.hist{max-height:20rem;overflow:auto}
+
+/* ---- notification centre: light yellow = program, light blue = stock & news ---- */
+.note{border:1px solid;border-left-width:6px;border-radius:.5rem;padding:.7rem .9rem;margin-bottom:.6rem}
+.note.program{background:var(--prog-bg);border-color:var(--prog-line)}
+.note.stock{background:var(--stock-bg);border-color:var(--stock-line)}
+.note.unread .nt::before{content:"● ";color:var(--sell)}
+.note .nt{font-weight:600}
+.note .meta{font-size:.8rem;color:var(--muted)}
+.note pre{background:transparent;padding:.3rem 0 0;margin:0;max-height:none;font-family:inherit;font-size:.933rem}
+.tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem}
+
+/* ---- help manual ---- */
+.manual h3{margin-top:1.6rem;padding-top:.6rem;border-top:1px solid var(--line)}
+.manual h3:first-of-type{border-top:none}
+.manual li{margin-bottom:.3rem}
+.manual .toc{columns:2;font-size:.933rem}
+kbd{border:1px solid var(--line);border-radius:.2rem;padding:0 .3rem;background:var(--soft-bg)}
+
+@media (max-width:820px){.app,[data-nav=collapsed] .app{grid-template-columns:1fr}nav{position:static;height:auto;flex-direction:row;flex-wrap:wrap}
+nav .run{display:none}main{padding:1rem}.topbar{padding:.5rem 1rem}.philos{grid-template-columns:1fr}.manual .toc{columns:1}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav aria-label="Sections">
+    <div class="brand"><h1>Value Screener</h1>
+      <button id="navtoggle" title="Collapse or expand the sidebar" aria-label="Collapse or expand the sidebar">☰</button></div>
+    <button data-view="portfolio" aria-current="page" title="My portfolio"><span class="ico">💼</span><span class="lbl">My portfolio</span></button>
+    <button data-view="analyse" title="Analyse a stock"><span class="ico">🔍</span><span class="lbl">Analyse a stock</span></button>
+    <button data-view="top250" title="Top 250"><span class="ico">📊</span><span class="lbl">Top 250</span></button>
+    <button data-view="scores" title="Scores &amp; shortlist"><span class="ico">⭐</span><span class="lbl">Scores &amp; shortlist</span></button>
+    <button data-view="alerts" title="News alerts"><span class="ico">📰</span><span class="lbl">News alerts</span></button>
+    <button data-view="ledger" title="Recommendation log"><span class="ico">📒</span><span class="lbl">Recommendation log</span></button>
+    <button data-view="notifications" title="Notifications"><span class="ico">🔔</span><span class="lbl">Notifications</span></button>
+    <button data-view="settings" title="Settings"><span class="ico">⚙️</span><span class="lbl">Settings</span></button>
+    <div class="run" id="jobline"></div>
+  </nav>
+  <div class="shell">
+    <div class="topbar">
+      <button class="tb" id="bell" title="Notifications: blue = stock &amp; news, yellow = about the program">🔔 <span class="badge" id="unread"></span></button>
+      <label title="Colour theme" style="flex-direction:row;align-items:center;gap:.3rem"><span>Theme</span>
+        <select id="themesel"><option value="light">Light blue</option><option value="dark">Night: black &amp; white</option>
+        <option value="green">Night: black &amp; green</option></select></label>
+      <label title="Text size" style="flex-direction:row;align-items:center;gap:.3rem"><span>Text</span>
+        <select id="textsel"><option value="small">Smaller</option><option value="">Normal</option><option value="large">Larger</option></select></label>
+      <button class="tb help" id="helpbtn" title="How to use this app (manual)" aria-label="Help manual">?</button>
+    </div>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<datalist id="stocklist"></datalist>
+<div id="status" role="status" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

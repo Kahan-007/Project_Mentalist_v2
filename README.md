@@ -1,95 +1,69 @@
-# Update: portfolio quotes and clearer research
+# India Screener — data, news/event tracker and portfolio ledger
 
-See [RUNNING.md](RUNNING.md) for the setup and background-start instructions.
+Python 3.10+, standard library only. No paid API, no broker API. Runs locally on Windows.
 
-- Quotes for holdings and the shortlist refresh independently every 60 seconds, with timestamps and errors.
-- Enter exact share quantities once to enable automatic portfolio value and daily P&L.
-- Explore starts with your holdings and top 15 scanned stocks; company search needs no manually maintained list.
-- Momentum scores are shown separately from immutable future-return forecasts.
-- Completed outcomes update the regression with modest decay of older training influence. Forward accuracy remains separate from historical fitting.
-- Automatic startup scripts are provided for Mac and Windows; Linux service instructions are included.
+## What's here
 
-Live provider verification timed out in the build environment. A working network connection to Yahoo Finance and NSE is required; no synthetic quotes replace failed requests.
+| Module | Does |
+|---|---|
+| `prices.py` | Daily OHLCV from Yahoo's public chart endpoint (NSE `.NS`, BSE `.BO`, Nifty `^NSEI`), validated, cached per day, today's candle excluded until 16:00 IST |
+| `universe.py` | Official NSE EQ list (EQUITY_L.csv) and clean short names for news search |
+| `news.py` | Google News RSS per company: relevance-filtered, de-duplicated, tagged (merger, deal, legal/regulatory, results, governance, pledge, rating) |
+| `events.py` | Market-model event study: confirms a news-session drop is abnormal (beyond Nifty and the stock's own noise); decides when price has levelled out |
+| `tracker.py` | Stores headlines, groups them into one event per trading session, runs the event lifecycle, prevents duplicate alerts |
+| `portfolio.py` | Exact Decimal FIFO ledger: buys, sells, fees, dividends, splits, bonuses; Zerodha tradebook CSV import (file, not API) |
+| `daily.py` | The daily job: shortlist + holdings → prices, news, events, alerts, markdown report in `data/reports/` |
+| `notify.py` | Alerts to `data/logs/alerts.log`, Windows toast, optional Telegram |
+| `schedule.py` | Windows Task Scheduler entry (weekdays 18:30, runs late if the PC was off) |
+| `fundamentals.py` | Reads Screener.in exports (.xlsx) or the CSV template, derives ROE, ROCE, FCF, CAGR etc. |
+| `scoring.py` | Buffett / Munger / Lynch percentage-match scores, separate criteria for banks/NBFCs |
+| `server.py`, `web/` | The local dashboard |
+| `index250.py` | Nifty LargeMidcap 250 list: universe, business-type suggestions, industry, file-to-symbol matching |
+| `verify.py` | Cross-checks: balance sheet, cash flow, quarters vs year, market cap, Screener vs Yahoo prices, index vs NSE list |
+| `shortlist.py` | **The hook for the Buffett/Munger/Lynch scoring core** — it writes `data/shortlist.json` |
 
-# Project Mentalist
+## Everyday use (Windows)
 
-A local NSE equity scanner with a portfolio ledger, separate short/long technical scores, and **recorded 5-session and 21-session return forecasts that learn from completed outcomes**.
+Double-click **Start Screener.bat**. The dashboard opens in your browser at http://127.0.0.1:8765 and only this computer can reach it.
 
-## Run
+- **My portfolio**: pick a stock, enter date, quantity, price and charges; or import a Zerodha tradebook CSV.
+- **Top 250**: all 250 companies, always listed. Bulk-import Screener exports; filter by bucket (quality core, growth, two or more, all three), single philosophy, minimum scores, industry, Lynch category and size; sort any column; export what you see to CSV; shortlist everything shown in one click.
+- **Current-price refresh**: upload a simple `Ticker,Latest_Price` CSV on Top 250 to bring today's price, market cap, P/E and margin-of-safety up to date between full Yahoo refreshes. It updates today's snapshot only, not the year-by-year history.
+- **Combined workbook**: import `NSE_Top250_Financials_FY2017_FY2026.xlsm` (all 250 companies at once) on the Top 250 tab or with `py -m india_screener import-workbook FILE`, then click *Fill year-end prices and market caps from Yahoo* (or `py -m india_screener fill-prices`).
+- **Analyse a stock**: prices, news and events for any NSE stock; upload its Screener.in "Export to Excel" file to get the Buffett, Munger and Lynch scores with every criterion shown.
+- **Bulk ownership entry**: on Top 250, filter to the stocks you care about (e.g. Quality core, Two or more) and click *Fill in promoter / pledge / institutional % for shown stocks* — one table, one Screener link per row, one Save.
+- **Scores & shortlist**: every imported company ranked; one click shortlists all stocks matching all three.
+- **News alerts**: run the daily check on demand and read alerts and reports.
+- **Settings**: G-Sec yield, pass mark, market-cap cut-offs, alerts.
 
-Requires Python 3.10+. No Streamlit, pip packages, API key or frontend build step.
+Double-click **Set up daily check.bat** once to run the news/event check every weekday at 18:30.
 
-```sh
-python3 server.py --open
+## Command line (optional)
+
+```
+cd C:\path\to\india_screener_project
+py -m unittest discover -s tests -p "test_*.py"
+py -m india_screener check INFY
+py -m india_screener shortlist add INFY HDFCBANK
+py -m india_screener portfolio import-zerodha --file tradebook.csv
+py -m india_screener daily --no-notify
+py -m india_screener notify-test
+py -m india_screener schedule install --time 18:30
 ```
 
-On Windows, use `py server.py --open`. Alternatively open `Start-Mac.command` or `Start-Windows.bat`. The dashboard opens at **http://127.0.0.1:8765**. Keep the terminal running. If that port is occupied, stop the previous version or add `--port 8766` (a new browser origin has separate portfolio storage).
+Copy `config.example.json` to `config.json` to change thresholds or add Telegram details.
 
-The public repository contains source code, not personal holdings or downloaded market-data snapshots. On first start it obtains NSE's EQ universe and downloads real daily history. Missing seed scripts are handled by the local server; use the launcher rather than opening index.html directly.
+## Honest limits
+- Yahoo's endpoint is unofficial; it can change or throttle. Everything goes through `prices.history()` so it can be swapped.
+- A confirmed dip means the stock fell abnormally in the session the news became public. It does not prove the headline caused it.
+- "Levelled out" is a stability test (calm range, no abnormal drift, trough held), not a forecast of recovery.
+- Portfolio values use the last completed close. Record splits/bonuses in the ledger or values will be wrong.
+- Scores are only as good as the imported statements. Use consolidated figures where they exist; the importer cannot tell.
+- Capex is estimated from the balance sheet (change in net block + CWIP + depreciation) because the export has no capex line.
+- Market-cap bands use cut-offs you set from AMFI's list, not a live ranking.
 
-## What changed
-
-### Faster scanning
-
-- **Continuous bounded queue:** a worker starts another symbol when it finishes; one slow stock no longer holds up an entire batch.
-- **Persistent compressed histories for every stock:** research and scanning share the same cache, including in-flight request deduplication.
-- **Reuse valid scores:** skip unchanged benchmark-date/model-version results once that stock has been registered with the learner.
-- Universe cached for 24 hours; completed history for 30 minutes, invalidated on the next India calendar day. Benchmark refresh is limited to 15 minutes.
-- Provider failures have a short retry cooldown; HTTP 429 backs off instead of hammering another host. Permanent missing-symbol errors wait longer.
-- Browser polling returns a small unchanged response when no scan state changed.
-- Checkpoints happen every three seconds and at completion, outside the main status lock.
-
-Default: 8 workers, configurable between 1 and 16 with `MENTALIST_SCAN_WORKERS`. A first full scan still depends on provider latency and availability; this does not turn the free daily feed into a real-time feed.
-
-The server checks again every 30 minutes while running, even if the browser is closed. Reopening the app catches up after downtime. Partial-market rankings remain hidden unless explicitly requested; company order is interleaved rather than alphabetical.
-
-### Forecasts that learn
-
-Open **Prediction history** in the sidebar, or a stock's **Why?** panel.
-
-1. The model observes completed price/volume history and records a 5-session and a 21-session expected net return.
-2. It saves the original prediction, features, timestamp, model version and training count in `.scanner/learning.sqlite`.
-3. The measurement starts at the first session open **strictly after the actual forecast issue date**, not after an old source-price date. This prevents retrospectively predicting an entry price already in the past.
-4. Once the horizon finishes, the app records the actual adjusted open-to-open return and forecast error.
-5. That completed label updates the model's coefficients. Earlier predictions are never revised to make them look better.
-
-There is at most one outstanding prediction per stock/horizon. Repeated scans do not count the same outcome twice. Missing endpoint prices defer evaluation instead of silently shifting the horizon. Current-day and future bars are excluded.
-
-The learner is a shared **online ridge regression** with fixed, bounded features: short/medium momentum, relative strength, long trend, volatility, volume and drawdown. Small sufficient-statistic matrices let it update incrementally without retraining from scratch. It warms up once per symbol on past, non-overlapping completed labels. Historical training is kept **separate** from forward-tested accuracy. Before 30 training labels it records a clearly marked no-price-change baseline.
-
-Both predictions and actual results include an assumed 0.20% cost per side. The no-price-change benchmark uses the same costs. Predicted net log return is bounded to ±0.4 as an outlier guard, not as a claim that this is a safe return range.
-
-The accuracy page reports mean absolute error, direction accuracy, sample count and error against that baseline, using the latest 200 resolved predictions per horizon. After 30 resolved predictions, stock cards can show a band based on the 90th percentile of previous absolute errors. This is a descriptive historical-error band, **not a calibrated confidence interval**.
-
-Learning can improve or worsen accuracy. “Below baseline” is shown when its measured error is worse. Cross-stock observations are correlated, historical samples are selected from the current universe, and no profitable predictive edge has been established. Forecasts remain experimental paper research and do not override entry rules or place orders.
-
-## Existing features
-
-- Long-term strength, short-term boost and 60/40 combined technical scores.
-- A separate two-stock short-term entry watch, allowed to show no qualifying entries.
-- Full company names and exchange links; source-linked news checked on demand.
-- Shared-budget whole-share allocation with stock exposure and planned-loss limits.
-- Original transaction dates and prices, FIFO cost basis, fees, dividends, splits and progress snapshots.
-- Opening-holdings snapshots when exact quantities/dates are not available; no invented trades.
-
-Scores are technical screening measures, not probabilities or fundamental valuations. News is context rather than automatic headline sentiment. The data source is unofficial Yahoo daily history; today’s candle is excluded. NSE EQ stocks are covered, not BSE-only listings or every instrument series.
-
-## Keep your existing portfolio
-
-Use the same browser and `http://127.0.0.1:8765`; its existing ledger and opening-holdings storage keys are preserved. Export backups before changing browser, device or port. Opening-holdings backups restore through **Update holdings**; transaction backups through **Data & settings**. A private `portfolio-seed.js` from an earlier download can also be copied locally; it is ignored by git.
-
-Keep `.scanner/` to preserve downloaded history and the learning record. It is ignored by git, as are database files, private seeds and downloaded snapshots. No portfolio values, credentials or market-data bundles are published in this repository.
-
-## Test
-
-Python and JavaScript suites use controlled fixtures and run without market access:
-
-```sh
-python3 -m unittest discover -s tests -p 'test_*.py'
-node --test tests/core.test.js tests/allocation.test.cjs
-python3 tests/benchmark_scanner.py
-```
-
-`tests/browser.cjs` uses Playwright/Chromium for development checks. Node and browser-test packages are not needed to run the application. `--no-scan` is a developer server flag that disables automatic scans.
-
-See [TEST_REPORT.md](TEST_REPORT.md) for executed checks and performance limits.
+## Scoring rules in one paragraph
+Each philosophy is a weighted percentage match with partial credit. Some criteria are **must-pass** (Buffett: consistent ROE, low debt,
+margin of safety; Munger: high and durable ROCE/ROE; Lynch: not overpaying for growth, sound balance sheet) - a stock can only "match"
+if it clears them. Munger's red flags (pledging, dilution, weak cash conversion, receivables, other income, low tax) only subtract.
+Cyclicals are valued on mid-cycle earnings. Fewer than 6 years of data makes a result provisional.

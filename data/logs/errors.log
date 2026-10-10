@@ -1,0 +1,72 @@
+[2026-09-25 23:23:04.037001] /api/scores
+Traceback (most recent call last):
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\server.py", line 790, in _dispatch
+    self._send(200, fn(parse_qs(u.query), body))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\server.py", line 778, in _send
+    self.wfile.write(data)
+    ~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\socketserver.py", line 845, in write
+    self._sock.sendall(b)
+    ~~~~~~~~~~~~~~~~~~^^^
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+[2026-09-25 23:23:41.427625] /api/top250?universe=nifty
+Traceback (most recent call last):
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\server.py", line 790, in _dispatch
+    self._send(200, fn(parse_qs(u.query), body))
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\server.py", line 778, in _send
+    self.wfile.write(data)
+    ~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\socketserver.py", line 845, in write
+    self._sock.sendall(b)
+    ~~~~~~~~~~~~~~~~~~^^^
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+[2026-10-01] KPITTECH
+Traceback (most recent call last):
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\net.py", line 40, in fetch
+    with urlopen(Request(url, headers=h, data=data), timeout=timeout) as resp:
+         ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 493, in open
+    response = meth(req, response)
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 464, in _call_chain
+    result = func(*args)
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\urllib\request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 404: Not Found
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\daily.py", line 85, in run
+    bars, heads = fut.result()
+                  ~~~~~~~~~~^^
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 396, in __get_result
+    raise self._exception
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "C:\Users\kahan\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\daily.py", line 78, in work
+    heads = news.fetch_news(it["symbol"], it["name"], it["aliases"], days=cfg["news_lookback_days"])
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\news.py", line 104, in fetch_news
+    return parse_rss(net.fetch(RSS.format(q=quote(query))), terms, days=days)
+                     ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kahan\Desktop\Project_Mentalist\india_screener_project\india_screener_project\india_screener\net.py", line 59, in fetch
+    raise FetchError(f"HTTP {exc.code} for {url}") from exc
+india_screener.net.FetchError: HTTP 404 for https://news.google.com/rss/search?q=%28%22KPIT%20Technologies%22%20OR%20%22KPITTECH%22%29%20when%3A4d&hl=en-IN&gl=IN&ceid=IN:en
+
