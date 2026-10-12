@@ -13,7 +13,7 @@ class Presets(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        for target, k, v in [(config, "DATA", root), (config, "CONFIG_PATH", root / "config.json")]:
+        for target, k, v in [(config, "ROOT", root), (config, "DATA", root), (config, "CONFIG_PATH", root / "config.json")]:
             p = mock.patch.object(target, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -71,7 +71,7 @@ class Signal(unittest.TestCase):
         self.assertEqual(a(True, False, score, {"price_discipline": 3.0})[0], "hold")
         self.assertEqual(a(True, False, score, {"price_discipline": 0})[0], "hold")            # off
         no_value = {"matches": ["munger"], "valuation": {"multiple": None}}
-        self.assertEqual(a(False, True, no_value, {"price_discipline": 2.0})[0], "buy")          # can't judge: not penalised
+        self.assertEqual(a(False, True, no_value, {"price_discipline": 2.0})[0], "review")       # unavailable valuation cannot authorize an entry
 
 
 PAGE = """<h1>Test Co Ltd</h1> NSE: TESTCO

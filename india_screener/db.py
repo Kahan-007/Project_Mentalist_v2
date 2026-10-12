@@ -75,6 +75,14 @@ def connect(path=None):
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA)
+    from .outbox import SCHEMA as OUTBOX_SCHEMA
+    db.executescript(OUTBOX_SCHEMA)
+    from .appnotify import SCHEMA as NOTIFICATION_SCHEMA
+    db.executescript(NOTIFICATION_SCHEMA)
+    from .quality import SCHEMA as QUALITY_SCHEMA
+    db.executescript(QUALITY_SCHEMA)
+    from .research import SCHEMA as RESEARCH_SCHEMA
+    db.executescript(RESEARCH_SCHEMA)
     try:
         with db:
             yield db

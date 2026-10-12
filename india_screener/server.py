@@ -1,6 +1,7 @@
 """Local dashboard: http://127.0.0.1:8765  (listens on this computer only)."""
 import datetime as dt
 import json
+import math
 import re
 import threading
 import time
@@ -183,7 +184,10 @@ def api_stock(q, body):
                                "manual": rec.get("manual", {})}
         try:
             out["score"] = _score(rec)
-            out["score"]["headroom"] = scoring.price_headroom(rec, None, size_ranks().get(sym))
+            r = out['score']
+            if not r['data_quality']['issues'] and not r['provisional'] and r['valuation']['multiple']:
+                r['headroom'] = scoring.price_headroom(rec, None, size_ranks().get(sym), entry=sym not in portfolio.holdings())
+            r['sensitivity'] = scoring.sensitivity(rec)
         except Exception as exc:
             out["score_error"] = f"{type(exc).__name__}: {exc}"
         out["sources"] = sources.for_record(rec, out.get("score"))
@@ -577,7 +581,8 @@ def api_scores(q, body):
                          **dict(zip(("signal", "signal_note"), recommendations.assess(sym in pos, sym in sl, r, st))),
                          "value_multiple": r["valuation"]["multiple"],
                          # price trigger only for your own stocks (it re-scores ~20 times, so not for all 250)
-                         "headroom": scoring.price_headroom(rec, st, ranks.get(sym)) if (sym in pos or sym in sl) else None})
+                         "headroom": scoring.price_headroom(rec, st, ranks.get(sym), entry=sym not in pos) if (sym in pos or sym in sl)
+                         and recommendations.assess(sym in pos, sym in sl, r, st)[0] != 'review' else None})
         except Exception as exc:
             rows.append({**base, "error": f"{type(exc).__name__}: {exc}"})
     rows.sort(key=lambda r: (-(r.get("match_count") or 0),
@@ -667,7 +672,7 @@ def api_run_daily(q, body):
 
 
 SETTING_KEYS = {"risk_free", "equity_premium", "terminal_growth", "pass_score", "min_coverage",
-                "large_cap_min_cr", "mid_cap_min_cr", "price_discipline"}
+                "large_cap_min_cr", "mid_cap_min_cr", "price_discipline", "entry_margin_of_safety"}
 
 
 # Alert sensitivity knobs editable on the Settings page: (section, key) -> (min, max, whole number?)
@@ -697,6 +702,13 @@ def api_settings_save(q, body):
     for k, v in b.get("scoring", {}).items():
         if k in SETTING_KEYS:
             v = float(v)
+            if not math.isfinite(v):
+                raise ValueError('Settings must be finite numbers')
+            ranges = {'pass_score':(0,100), 'min_coverage':(0,1), 'large_cap_min_cr':(1,1e9), 'mid_cap_min_cr':(1,1e9)}
+            if k in ranges and not ranges[k][0] <= v <= ranges[k][1]:
+                raise ValueError(f'{k} is outside its allowed range')
+            if k == 'entry_margin_of_safety' and not (v == -1 or 0 <= v <= .8):
+                raise ValueError('Entry margin of safety must be -1 (legacy) or between 0 and 0.8')
             if k in ("risk_free", "equity_premium", "terminal_growth") and not (0 <= v < 0.5):
                 raise ValueError(f"{k} must be a fraction, e.g. 0.068 for 6.8%")
             if k == "price_discipline" and not (v == 0 or 1.2 <= v <= 10):
@@ -786,6 +798,67 @@ POST = {"/api/presets": api_presets_action, "/api/notifications/read": api_notif
         "/api/manual-bulk": api_manual_bulk, "/api/index-list": api_index_upload, "/api/sector": api_sector}
 
 
+def api_telegram_pair(q, body):
+    from . import telegram, monitor
+    result = telegram.begin(json.loads(body).get('token', ''))
+    monitor.start()
+    return result
+
+
+def api_telegram_status(q, body):
+    from . import telegram, monitor
+    return {**telegram.status(), 'monitor': monitor.status()}
+
+
+def api_telegram_disconnect(q, body):
+    from . import telegram
+    telegram.disconnect()
+    return {'linked': False}
+
+
+GET['/api/telegram'] = api_telegram_status
+POST['/api/telegram/pair'] = api_telegram_pair
+POST['/api/telegram/disconnect'] = api_telegram_disconnect
+
+
+def api_quality(q, body):
+    from . import monitor, quality, research, risk
+    return {'monitor':monitor.status(), 'alerts':quality.report(), 'risk':risk.report(), 'research':research.report()}
+
+
+def api_feedback(q, body):
+    from .quality import feedback
+    data = json.loads(body)
+    return feedback(int(data['alert_id']),str(data['rating']),str(data.get('note','')))
+
+
+def api_risk_limits(q, body):
+    data = json.loads(body)
+    limits = {}
+    for key in ('max_stock_weight','max_sector_weight'):
+        value = float(data[key])
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError('Exposure limits must be between 0 and 1; 0 disables a limit')
+        limits[key] = value
+    cfg = storage.read_json(config.CONFIG_PATH) or {}
+    cfg['risk'] = limits
+    storage.write_json(config.CONFIG_PATH,cfg)
+    return {'saved':True}
+
+
+GET['/api/quality'] = api_quality
+POST['/api/feedback'] = api_feedback
+POST['/api/risk-limits'] = api_risk_limits
+
+
+def api_valuation_worksheet(q, body):
+    from .valuation import calculate
+    return calculate(json.loads(body))
+
+
+POST['/api/valuation-worksheet'] = api_valuation_worksheet
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -865,6 +938,9 @@ def serve(port=8765, open_browser=True):
         raise SystemExit(f"Port {port} is busy ({exc}). Is the screener already running? Try --port {port + 1}.")
     url = f"http://127.0.0.1:{port}/"
     print(f"Screener running at {url}  (close this window or press Ctrl+C to stop)", flush=True)
+    from . import monitor
+    if config.load_config()['monitor']['enabled']:
+        monitor.start()
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
@@ -872,4 +948,5 @@ def serve(port=8765, open_browser=True):
     except KeyboardInterrupt:
         pass
     finally:
+        monitor.STOP.set()
         httpd.server_close()

@@ -24,6 +24,8 @@ DEFAULTS = {
     "history_range": "2y",
     "workers": 4,
     "news_lookback_days": 4,
+    "monitor": {"enabled": True, "poll_seconds": 60, "headline_max_age_minutes": 60},
+    "risk": {"max_stock_weight": 0, "max_sector_weight": 0},  # 0 = no user-defined limit
     "event": {
         "estimation_sessions": 120,      # market-model fit window before the event
         "min_estimation_sessions": 60,
@@ -68,9 +70,18 @@ def load_config(path=None):
     if path.exists():
         user = json.loads(path.read_text(encoding="utf-8"))
     cfg = _merge(DEFAULTS, user)
+    from . import telegram
+    local = telegram.load()
     # Secrets may also come from environment variables.
     cfg["notify"]["telegram_bot_token"] = os.environ.get("SCREENER_TELEGRAM_TOKEN", cfg["notify"]["telegram_bot_token"])
     cfg["notify"]["telegram_chat_id"] = os.environ.get("SCREENER_TELEGRAM_CHAT", cfg["notify"]["telegram_chat_id"])
+    # Explicit local pairing controls this worker; environment values remain a headless fallback.
+    if local.get('token'):
+        cfg['notify']['telegram_bot_token'] = local['token']
+        cfg['notify']['telegram_chat_id'] = local.get('notify_chat_id') or local.get('chat_id', '')
+    if local.get('disabled'):
+        cfg['notify']['telegram_bot_token'] = ''
+        cfg['notify']['telegram_chat_id'] = ''
     cfg["notify"]["ntfy_topic"] = os.environ.get("SCREENER_NTFY_TOPIC", cfg["notify"]["ntfy_topic"])
     cfg["notify"]["discord_webhook"] = os.environ.get("SCREENER_DISCORD_WEBHOOK", cfg["notify"]["discord_webhook"])
     return cfg

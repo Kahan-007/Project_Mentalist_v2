@@ -9,10 +9,44 @@ import re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
-from . import net
+from . import net, config
 from .universe import short_name
 
 RSS = "https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+NSE_RSS = "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"
+
+
+def parse_nse(xml_bytes, watched):
+    """Match the issuer's exact normalized name, never incidental company mentions in a disclosure."""
+    from urllib.parse import urlsplit
+    import html
+    normalize = lambda s: re.sub(r'[^a-z0-9]', '', short_name(s).lower())
+    names = {}
+    for item in watched:
+        if item.get('exchange', 'NSE') != 'NSE':
+            continue
+        for name in [item.get('name', ''), *item.get('aliases', [])]:
+            if name:
+                names.setdefault(normalize(name), set()).add(item['symbol'])
+    result = {item['symbol']: [] for item in watched}
+    for entry in ET.fromstring(xml_bytes).findall('./channel/item'):
+        issuer = (entry.findtext('title') or '').strip()
+        symbols = names.get(normalize(issuer), set())
+        if len(symbols) != 1:
+            continue
+        link = (entry.findtext('link') or '').strip()
+        parts = urlsplit(link)
+        if parts.scheme != 'https' or parts.hostname not in ('nsearchives.nseindia.com', 'www.nseindia.com', 'archives.nseindia.com'):
+            continue
+        try:
+            published = dt.datetime.strptime(entry.findtext('pubDate') or '', '%d-%b-%Y %H:%M:%S').replace(tzinfo=config.IST)
+        except ValueError:
+            continue
+        detail = html.unescape(re.sub(r'<[^>]*>', '', entry.findtext('description') or '')).strip()
+        title = f'{issuer}: {detail}'
+        result[next(iter(symbols))].append({'title': title, 'url': link, 'source': 'NSE corporate announcement',
+            'published_utc': published.astimezone(dt.timezone.utc).isoformat(), 'categories': categorize(detail)})
+    return result
 
 CATEGORIES = {
     "merger/acquisition": ["merger", "mergers", "merge", "merges", "acquisition", "acquisitions", "acquire", "acquires", "acquired",

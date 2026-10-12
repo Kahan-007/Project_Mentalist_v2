@@ -144,7 +144,7 @@ def assess_levelling(stock_bars, bench_bars, session_date, ev, lv):
     last = len(pairs) - 1
     pre_adj = pairs[e - 1][0]["adjclose"]
     lows = [(pairs[i][0]["low"] * pairs[i][0]["adjclose"] / pairs[i][0]["close"], i) for i in range(e, len(pairs))]
-    trough, trough_i = min(lows)
+    trough, trough_i = min(lows, key=lambda pair: (pair[0], -pair[1]))
     base = {
         "sessions_since_event": len(pairs) - e,
         "recovery_vs_pre_event": pairs[last][0]["adjclose"] / pre_adj - 1,

@@ -50,14 +50,15 @@ def headlines_for(symbol, session, path=None):
             (symbol, session))]
 
 
-def evaluate(symbol, stock_bars, bench_bars, cfg, path=None):
+def evaluate(symbol, stock_bars, bench_bars, cfg, path=None, publish=True):
     """Advance all open events for one symbol. Returns alert dicts for newly confirmed dips / levellings."""
     alerts = []
     e_cfg, l_cfg = cfg["event"], cfg["levelling"]
     dates = [b["date"] for b in stock_bars]
     with dbm.connect(path) as db:
         open_events = db.execute(
-            "SELECT * FROM events WHERE symbol=? AND status IN ('provisional','dip_confirmed') ORDER BY event_session",
+            "SELECT * FROM events WHERE symbol=? AND (status IN ('provisional','dip_confirmed') OR "
+            "(status='levelled' AND (notified_dip=0 OR notified_level=0))) ORDER BY event_session",
             (symbol,)).fetchall()
     for row in open_events:
         session, status = row["event_session"], row["status"]
@@ -84,11 +85,35 @@ def evaluate(symbol, stock_bars, bench_bars, cfg, path=None):
                            "WHERE symbol=? AND status='dip_confirmed' AND event_session<?", (symbol, session))
             if new_status in ("dip_confirmed", "levelled") and not row["notified_dip"]:
                 alerts.append({"type": "dip", "symbol": symbol, "session": session, "detail": detail})
-                db.execute("UPDATE events SET notified_dip=1 WHERE id=?", (row["id"],))
+                if publish:
+                    queue_event(alerts[-1], cfg, db)
+                    db.execute("UPDATE events SET notified_dip=1 WHERE id=?", (row["id"],))
             if new_status == "levelled" and not row["notified_level"]:
                 alerts.append({"type": "levelled", "symbol": symbol, "session": session, "detail": detail})
-                db.execute("UPDATE events SET notified_level=1 WHERE id=?", (row["id"],))
+                if publish:
+                    queue_event(alerts[-1], cfg, db)
+                    db.execute("UPDATE events SET notified_level=1 WHERE id=?", (row["id"],))
     return alerts
+
+
+def queue_event(alert, cfg, db):
+    from . import outbox
+    title = f"{alert['symbol']}: " + ('news-linked abnormal drop' if alert['type'] == 'dip' else 'price has levelled out')
+    rows = db.execute('SELECT title,url FROM news WHERE symbol=? AND event_session=?', (alert['symbol'], alert['session'])).fetchall()
+    dip, level = alert['detail'].get('dip', {}), alert['detail'].get('levelling', {})
+    percent = lambda x: 'unavailable' if x is None else f'{x*100:+.2f}%'
+    if alert['type'] == 'dip':
+        detail = (f"Market-adjusted return: {percent(dip.get('abnormal_return'))}. "
+                  f"Stock return: {percent(dip.get('raw_return'))}; benchmark: {percent(dip.get('market_return'))}.\n"
+                  f"Required abnormal drop: {percent(-(dip.get('threshold') or 0))}.")
+    else:
+        detail = (f"Return from pre-event close: {percent(level.get('recovery_vs_pre_event'))}.\n"
+                  f"Trough: {level.get('trough_date')}; return at trough: {percent(level.get('trough_vs_pre_event'))}.\n"
+                  'Daily stability checks passed; this does not predict a rebound.')
+    body = (f"Event session: {alert['session']}\n" + detail + '\n' +
+            '\n'.join(f"{r['title']}\n{r['url']}" for r in rows[:4]) +
+            '\nSame-session association does not prove causation. Review manually; no order placed.')
+    outbox.enqueue(title, body, f"event:{alert['symbol']}:{alert['session']}:{alert['type']}", cfg, db)
 
 
 def list_events(statuses=None, path=None):

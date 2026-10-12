@@ -12,7 +12,7 @@ class Daily(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.patches = [mock.patch.object(config, k, v) for k, v in {
-            "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
+            "ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
             "DB_PATH": root / "db.sqlite", "SHORTLIST_PATH": root / "shortlist.json", "CONFIG_PATH": root / "none.json"}.items()]
         for p in self.patches:
             p.start()
@@ -43,9 +43,9 @@ class Daily(unittest.TestCase):
              mock.patch("india_screener.universe.load", lambda refresh=False: [{"symbol": "TCS", "name": "Tata Consultancy Services Limited"}]), \
              mock.patch("india_screener.autofill.run", lambda: {}), \
              mock.patch("india_screener.price_snapshot.refresh", lambda **k: {"nse_error": None, "yahoo_failed": {}}), \
-             mock.patch("india_screener.notify.send") as send:
+             mock.patch("india_screener.notify.deliver") as send:
             res = daily.run(send_alerts=True)
-            return res, [c.args[0] for c in send.call_args_list]
+            return res, [c.args[2] for c in send.call_args_list if c.args[0] == "log"]
 
     def test_lifecycle(self):
         res, titles = self.run_daily()
@@ -68,7 +68,7 @@ class Daily(unittest.TestCase):
         self.assertIn("## Financial analysis (holdings and shortlist)", report)
         self.assertIn("| TCS | held |", report)   # holdings are analysed too, even when not shortlisted
         from india_screener import recommendations
-        logged = recommendations.history(full=True)
+        logged = [r for r in recommendations.history(full=True) if r["reason"].startswith("alert_")]
         self.assertEqual([r["reason"] for r in logged], ["alert_levelled", "alert_dip"])   # newest first, one per alert
         self.assertIn("abnormal drop", logged[1]["note"])
 

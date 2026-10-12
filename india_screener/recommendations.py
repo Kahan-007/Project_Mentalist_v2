@@ -36,10 +36,25 @@ def assess(held, shortlisted, score, st=None):
     """(signal, reason) using the scores plus the price-discipline setting."""
     from . import scoring
     st = st or scoring.settings()
+    if not (held or shortlisted):
+        return None, ""
+    if not score:
+        return "review", "Financial analysis unavailable; no investment decision can be made"
+    issues = score.get("data_quality", {}).get("issues", [])
+    if score.get("provisional"):
+        issues = [*issues, "fewer than six annual observations"]
+    if issues:
+        return "review", "Data review required: " + "; ".join(issues)
     matches = (score or {}).get("matches") or []
     val = (score or {}).get("valuation") or {}
     lim, mult = st.get("price_discipline") or 0, val.get("multiple")
+    if mult is None or not math.isfinite(mult) or mult <= 0:
+        return "review", "No valid positive valuation; price attractiveness cannot be assessed"
     over = bool(lim and mult and mult > lim)
+    entry_mos = st.get('entry_margin_of_safety', -1)
+    if not held and shortlisted and matches and entry_mos >= 0 and 1-mult < entry_mos-1e-12:
+        return 'watch', (f'matches {", ".join(k.title() for k in matches)}; margin of safety {1-mult:.1%} '
+                         f'is below your entry requirement of {entry_mos:.1%}. Existing holdings use the separate exit rule')
     s = signal(held, shortlisted, matches, over)
     if s is None:
         return None, ""
@@ -117,22 +132,42 @@ def safe_record(*args, **kw):
         return None
 
 
-def log_signal_changes(items, analyses):
-    """Record a row whenever a watched stock's Buy / Sell / In-portfolio signal changes (checked daily).
-    Stocks whose financials aren't imported have no signal to track and are skipped."""
-    path = config.DATA / "signals.json"
-    last = storage.read_json(path) or {}
-    now = {}
+def log_signal_changes(items, analyses, publish=True):
+    """Freeze transitions and queue delivery in the same transaction; initial state establishes a baseline."""
+    from . import outbox, scoring
+    if not publish:
+        return
+    cfg, st = config.load_config(), scoring.settings()
     for it in items:
-        r, _ = analyses.get(it["symbol"], (None, None))
-        if not r:
-            continue
-        s, why = assess(it["held"], it["shortlisted"], r)
-        now[it["symbol"]] = s
-        if s in ("buy", "sell") and last.get(it["symbol"]) != s:
-            safe_record(it["symbol"], "signal_" + s,
-                        note=f"signal changed from {last.get(it['symbol']) or 'none'} to {s}: {why}")
-    storage.write_json(path, now)
+        sym = it['symbol']
+        analysis, err = analyses.get(sym, (None, None))
+        signal_now, why = assess(it['held'], it['shortlisted'], analysis, st)
+        meta = (fundamentals.load(sym) or {}).get('meta', {})
+        stamp = config.now_ist().isoformat()
+        with dbm.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT signal FROM signal_state WHERE symbol=?', (sym,)).fetchone()
+            if old and old['signal'] == signal_now:
+                continue
+            prior = old['signal'] if old else 'initial baseline'
+            note = f'{prior} → {signal_now}: {why}'
+            sc = lambda k: (analysis or {}).get(k, {}).get('score')
+            snapshot = {**(analysis or {}), 'settings_snapshot': st, 'analysis_error': err}
+            cur = db.execute(
+                'INSERT INTO recommendation_log(logged_at,symbol,reason,held,shortlisted,price,price_date,price_source,'
+                'buffett,munger,lynch,matches,note,headlines,analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (stamp, sym, 'signal_'+str(signal_now), int(it['held']), int(it['shortlisted']),
+                 meta.get('price'), meta.get('price_date'), meta.get('price_source'),
+                 sc('buffett'), sc('munger'), sc('lynch'), json.dumps((analysis or {}).get('matches', [])),
+                 note, '[]', json.dumps(_clean(snapshot))))
+            if old:
+                title = f'{sym}: model status changed to {signal_now}'
+                body = f"{note}\nPrice as of {meta.get('price_date') or 'unknown'}.\nModel review prompt; no trade executed."
+                outbox.enqueue(title, body, f'signal:{cur.lastrowid}', cfg, db)
+                db.execute('INSERT INTO app_notifications(created_at,kind,title,body,symbol) VALUES(?,?,?,?,?)',
+                           (stamp, 'stock', title, body, sym))
+            db.execute('INSERT INTO signal_state VALUES(?,?,?) ON CONFLICT(symbol) DO UPDATE SET signal=excluded.signal,updated_at=excluded.updated_at',
+                       (sym, signal_now, stamp))
 
 
 def history(symbol=None, limit=500, full=False, path=None):

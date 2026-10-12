@@ -1,7 +1,25 @@
 {
   "workers": 4,
   "news_lookback_days": 4,
-  "event": {"min_abnormal_drop": 0.03, "sigma_multiple": 2.0, "window_sessions": 2},
-  "levelling": {"sessions": 5, "atr_ratio_max": 1.25, "drift_sigma_max": 1.0, "no_new_low_sessions": 3},
-  "notify": {"windows_toast": true, "telegram_bot_token": "", "telegram_chat_id": ""}
+  "event": {
+    "min_abnormal_drop": 0.03,
+    "sigma_multiple": 2.0,
+    "window_sessions": 2
+  },
+  "levelling": {
+    "sessions": 5,
+    "atr_ratio_max": 1.25,
+    "drift_sigma_max": 1.0,
+    "no_new_low_sessions": 3
+  },
+  "notify": {
+    "windows_toast": true,
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+  },
+  "monitor": {
+    "enabled": true,
+    "poll_seconds": 60,
+    "headline_max_age_minutes": 60
+  }
 }

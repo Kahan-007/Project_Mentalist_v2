@@ -264,9 +264,6 @@ def run(force=False, weekly_days=7):
             ("ownership", fill_ownership, weekly_days), ("prices", fill_all_prices, weekly_days)]
     for name, fn, every in jobs:
         last = state.get(name)
-        if name == "financials" and today.month not in RESULTS_MONTHS:
-            out[name] = "skipped (outside results season: May-June, November-December)"
-            continue
         if not force and last and (today - dt.date.fromisoformat(last)).days < every:
             out[name] = f"skipped (last run {last})"
             continue

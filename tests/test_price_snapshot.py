@@ -28,7 +28,7 @@ class PriceSnapshot(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         patches = [mock.patch.object(config, k, v) for k, v in {
-            "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
+            "ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
             "CONFIG_PATH": root / "config.json"}.items()]
         patches += [mock.patch.object(price_snapshot, "STATUS_PATH", root / "status.json"),
                     mock.patch.object(config, "now_ist", return_value=dt.datetime(2026, 9, 25, 19, 0, tzinfo=config.IST))]

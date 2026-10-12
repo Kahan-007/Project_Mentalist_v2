@@ -8,6 +8,75 @@ const pct = (x, d = 1) => x == null ? "–" : (x * 100).toFixed(d) + "%";
 const signed = (x, f = inr) => x == null ? "–" : `<span class="${x >= 0 ? "gain" : "loss"}">${x >= 0 ? "+" : "−"}${f(Math.abs(x))}</span>`;
 const today = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
 
+async function monitorView() {
+  const d = await guard(() => api('/api/quality')); if (!d) return;
+  const q = d.alerts, r = d.risk, research = d.research;
+  const seconds = x => x == null ? 'No samples yet' : `${Math.round(x)} s`;
+  const outcomes = row => [20,60,120,252].map(h => {
+    const o = row.outcomes[h];
+    return o.status === 'observed' ? `<td title="${esc(`From ${o.entry_date} to ${o.end_date}; benchmark ${pct(o.benchmark_return)}, excess ${pct(o.excess_return)}, maximum drawdown ${pct(o.max_drawdown)}`)}">${pct(o.stock_return)}</td>` : `<td class="muted">${esc(o.status)}</td>`;
+  }).join('');
+  main.innerHTML = `<h2>Monitor &amp; portfolio risk</h2>
+    <button class="btn ghost" id="qualityrefresh">Refresh status</button>
+    <section class="box"><h3>Service and source health</h3>
+      <p>Monitor: <b>${d.monitor.running ? 'running' : 'stopped or stale'}</b>. Telegram: ${d.monitor.telegram.linked ? 'linked' : 'not linked'}.
+      Pending Telegram deliveries: ${q.pending_telegram}; oldest: ${seconds(q.oldest_pending_seconds)}.</p>
+      <table><thead><tr><th class="l">Source</th><th>State</th><th>Last completed check</th></tr></thead><tbody>
+      ${d.monitor.sources.map(s => `<tr><td class="l">${esc(s.source)}</td><td>${esc(s.state)}</td><td>${esc(s.checked_at || 'Not checked')}</td></tr>`).join('')}</tbody></table>
+      <p class="muted">The Mac must be awake and online. A running process does not by itself establish that every source is healthy.</p></section>
+    <section class="box"><h3>Alert quality · last ${q.days} days</h3>
+      <p>Detected headline records: ${Object.values(q.counts).reduce((a,b)=>a+b,0)}. Newly queued: ${q.counts.queued || 0}; too old for push: ${q.counts.stale || 0}.</p>
+      <table><thead><tr><th class="l">Measured delay</th><th>Samples</th><th>Median</th><th>95th percentile</th></tr></thead><tbody>
+      ${[['Publication to detection',q.publication_to_detection],['Queue to Telegram acknowledgement',q.queue_to_delivery]].map(([label,v]) => `<tr><td class="l">${label}</td><td>${v.samples}</td><td>${seconds(v.median_seconds)}</td><td>${seconds(v.p95_seconds)}</td></tr>`).join('')}</tbody></table>
+      <p class="muted">${esc(q.note)} Feedback describes usefulness; it does not measure investment returns.</p>
+      <p>${esc(Object.entries(q.feedback).map(([k,v])=>`${k}: ${v}`).join(' · ') || 'No feedback yet.')}</p>
+      <details><summary>Recent headlines and feedback (${q.recent.length})</summary>
+      ${q.recent.map(a => `<article class="note stock"><div class="nt">${esc(a.symbol)} · ${esc(a.priority)} ${a.alert_id ? `· #${a.alert_id}` : ''}</div>
+        <p>${esc(a.title)}</p><p class="meta">${esc(a.source)} · ${esc(a.disposition)} · ${esc(a.explanation)}</p>
+        <a href="${esc(/^https:\/\//.test(a.url) ? a.url : '#quality')}" target="_blank" rel="noopener">Original source</a>
+        ${a.alert_id ? `<label>Feedback<select data-feedback="${a.alert_id}"><option value="">Not rated</option>${['useful','noise','incorrect','duplicate'].map(v=>`<option ${v===a.rating?'selected':''}>${v}</option>`).join('')}</select></label>` : ''}</article>`).join('') || '<p>No measured headlines yet. Existing historical alerts are not assigned invented timing data.</p>'}</details></section>
+    <section class="box"><h3>Portfolio concentration</h3>
+      <p>Known equity value: <b>${inr(r.known_value)}</b>. Price coverage: ${r.complete_prices ? 'complete and within freshness limit' : 'incomplete, stale or empty'}.</p>
+      ${r.issues.length ? `<p class="warn">${r.issues.map(esc).join('<br>')}</p>` : ''}
+      <div class="scroll"><table><thead><tr><th class="l">Stock</th><th>Saved price date</th><th>Value</th><th>Share of valued equities</th><th class="l">Industry</th><th>Limit</th></tr></thead><tbody>
+      ${r.holdings.map(p=>`<tr><td class="l">${esc(p.symbol)}</td><td>${esc(p.price_date)}</td><td>${inr(p.value)}</td><td>${pct(p.weight)}</td><td class="l">${esc(p.industry)}</td><td>${p.over_limit?'Above your limit':'—'}</td></tr>`).join('')}</tbody></table></div>
+      <p>${r.industries.map(s=>`${esc(s.industry)}: ${pct(s.weight)}${s.over_limit?' (above your limit)':''}`).join(' · ')}</p>
+      <p class="muted">${esc(r.note)}</p>
+      <form id="risklimits" class="row"><label>Single-stock limit (%)<input name="max_stock_weight" type="number" min="0" max="100" step="1" value="${100*(r.limits.max_stock_weight||0)}"></label>
+      <label>Industry limit (%)<input name="max_sector_weight" type="number" min="0" max="100" step="1" value="${100*(r.limits.max_sector_weight||0)}"></label>
+      <button class="btn">Save warning limits</button><span class="muted">0 disables a limit. Warnings only; no holdings or orders are changed.</span></form></section>
+    <section class="box"><h3>Cash-flow valuation worksheet</h3>
+      <p>Use normalized cash flow checked against the company's statements. FCFF means cash available to all capital providers; FCFE means cash available to equity shareholders after financing flows. This worksheet does not change scores or active signals.</p>
+      <form id="valuationworksheet" class="row"><label>Cash-flow model<select name="kind"><option>FCFF</option><option>FCFE</option></select></label>
+      <label>Normalized annual cash flow (₹ cr)<input name="cash_flow_cr" type="number" min="0.000001" step="any" required></label>
+      <label>Discount rate (%)<input name="discount_rate" type="number" min="0.01" max="50" step="any" required><span>WACC for FCFF; cost of equity for FCFE</span></label>
+      <label>Forecast growth (%)<input name="growth" type="number" min="-50" max="50" step="any" required></label>
+      <label>Terminal growth (%)<input name="terminal_growth" type="number" min="0" max="49" step="any" required></label>
+      <label>Current diluted shares (cr)<input name="shares_cr" type="number" min="0.000001" step="any" required></label>
+      <label>Debt (₹ cr; FCFF only)<input name="debt_cr" type="number" min="0" step="any" value="0" required></label>
+      <label>Surplus cash (₹ cr; FCFF only)<input name="cash_cr" type="number" min="0" step="any" value="0" required></label>
+      <button class="btn">Calculate research value</button></form><div id="valuationresult" role="status"></div></section>
+    <section class="box"><h3>Forward research archive</h3><p>${research.total} dated observations saved. Benchmark: ${esc(research.benchmark)}. Price-history cache updated: ${esc(research.benchmark_fetched_at || 'not available')}.</p>
+      <p>${esc(research.note)}</p><div class="scroll"><table><thead><tr><th class="l">Observed at</th><th>Stock</th><th>Model label</th><th>20-session return</th><th>60-session return</th><th>120-session return</th><th>252-session return</th></tr></thead><tbody>
+      ${research.recent.slice(0,20).map(o=>`<tr><td class="l">${esc(o.observed_at)}</td><td>${esc(o.symbol)}</td><td>${esc(o.signal)}</td>${outcomes(o)}</tr>`).join('')}</tbody></table></div>
+      <p class="muted">The archive starts now; outcomes appear only after enough subsequent trading sessions. These are descriptive returns, not executable paper trades. Refreshing this page uses cached prices; the daily job refreshes market data.</p></section>`;
+  $('#valuationworksheet').onsubmit = e => {e.preventDefault(); guard(async () => {
+    const input = Object.fromEntries(new FormData(e.target));
+    for (const key of ['discount_rate','growth','terminal_growth']) input[key] = Number(input[key])/100;
+    const v = await api('/api/valuation-worksheet',input);
+    $('#valuationresult').innerHTML = `<p>Estimated equity value: ${cr(v.equity_value_cr)} · ${inr(v.value_per_share)} per share. Terminal value contributes ${pct(v.terminal_share)} of discounted cash-flow value.</p><p class="warn">${esc(v.note)}</p>`;
+  });};
+  $('#qualityrefresh').onclick = () => monitorView();
+  $('#risklimits').onsubmit = e => {e.preventDefault(); guard(async () => {
+    await api('/api/risk-limits',Object.fromEntries([...new FormData(e.target)].map(([k,v])=>[k,Number(v)/100])));
+    status('Risk warning limits saved'); monitorView();
+  });};
+  document.querySelectorAll('[data-feedback]').forEach(el => el.onchange = () => guard(async () => {
+    if (!el.value) return;
+    await api('/api/feedback',{alert_id:Number(el.dataset.feedback),rating:el.value}); status('Feedback saved');
+  }));
+}
+
 function status(msg, err = false, ms = 4000) {
   const el = $("#status"); el.textContent = msg; el.className = err ? "err" : ""; el.style.display = "block";
   clearTimeout(status.t); status.t = setTimeout(() => el.style.display = "none", ms);
@@ -58,7 +127,7 @@ async function refreshUnread() {
 setInterval(refreshUnread, 60000);
 
 // ---- navigation
-const views = {portfolio, analyse, top250, scores, alerts, ledger, notifications, settings, help};
+const views = {quality: monitorView, portfolio, analyse, top250, scores, alerts, ledger, notifications, settings, help};
 function go(view, arg) {
   const h = view + (arg ? "/" + arg : "");
   if (location.hash.slice(1) !== h) location.hash = h; else route();
@@ -201,6 +270,10 @@ async function analyse(sym) {
       <span class="chip src"${tip(src.roe + "\n5-year median: " + (sc.returns.roe_5y == null ? "n/a" : pct(sc.returns.roe_5y)))}>ROE ${sc.returns.roe == null ? "–" : pct(sc.returns.roe)}</span>
       ${Object.values(src.manual || {}).map(t => `<span class="chip src"${tip(t)}>${esc(t.split(":")[0])} ✓</span>`).join("")}</p>
     ${sc.headroom ? `<p class="muted">Price trigger: ${trigger(sc.headroom)} <span style="font-size:.867rem">— ${esc(sc.headroom.note)}, all else equal.</span></p>` : ""}
+    ${sc.sensitivity ? `<details class="box"><summary>Valuation sensitivity — how assumptions change estimated value</summary>
+      <p class="warn">${esc(sc.sensitivity.limitation)}</p><p>${esc(sc.sensitivity.note)}</p>
+      <div class="scroll"><table><thead><tr><th class="l">Assumption</th><th>Discount rate</th><th>Estimated value/share</th><th>Margin of safety</th></tr></thead><tbody>
+      ${sc.sensitivity.scenarios.map(v => `<tr><td class="l" title="${esc(v.assumptions)}">${esc(v.scenario)}</td><td>${pct(v.discount_rate)}</td><td>${v.value_per_share > 0 ? inr(v.value_per_share) : "No positive value"}</td><td>${pct(v.margin_of_safety)}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
     <div class="philos">${philCard("buffett", "Buffett", sc.buffett, pass)}${philCard("munger", "Munger", sc.munger, pass)}${philCard("lynch", "Lynch", sc.lynch, pass)}</div></section>`
     : d.score_error ? `<div class="warn">Scoring failed: ${esc(d.score_error)}</div>` : `<div class="warn">No financials imported yet, so no Buffett/Munger/Lynch scores.</div>`}
   ${d.checks ? `<section class="box"><h3 style="margin-top:0">Data checks</h3>${checksList(d.checks)}
@@ -296,7 +369,7 @@ function valueCell(mult, lim) {
   return `<span class="src ${over ? "loss" : ""}"${tip(`Market value is ${mult.toFixed(2)}x the program's conservative value estimate (DCF, or justified P/B for lenders). `
     + (lim ? `Your price-discipline limit is ${lim}x${over ? ": above it" : ""}.` : "Price discipline is off."))}>${mult.toFixed(1)}×</span>`;
 }
-const SIG = {hold: "In portfolio", buy: "Buy", sell: "Sell", watch: "Watching"};
+const SIG = {review: "Review data", hold: "In portfolio", buy: "Buy", sell: "Sell", watch: "Watching"};
 const sigChip = (s, why) => s ? `<span class="sig ${s}"${tip(why ? SIG[s] + ": " + why : "")}>${SIG[s]}</span>` : "";
 function t250Filter(r) {
   const f = t250, q = f.q.trim().toUpperCase();
@@ -359,8 +432,8 @@ async function top250() {
     <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="wbkeep" checked> Keep companies already imported from single Screener exports (they have quarters and prices)</label></div>
     <p class="muted" style="font-size:.867rem">The workbook has no year-end share prices. After importing, fetch them from Yahoo so the retained-earnings test can run and market caps are current.</p>
     <div id="wbres"></div></details>
-    <div class="row" style="margin-top:8px"><button class="btn ghost" id="finref" title="Normally automatic: weekly in May-June and November-December">Refresh financials from Screener.in now</button>
-      <span class="muted" id="finstat" style="align-self:center">Automatic every week in results season (May–June, Nov–Dec). Takes about 15 minutes.</span></div>
+    <div class="row" style="margin-top:8px"><button class="btn ghost" id="finref" title="Automatic weekly refresh throughout the year">Refresh financials from Screener.in now</button>
+      <span class="muted" id="finstat" style="align-self:center">Automatic every week throughout the year. Takes about 15 minutes.</span></div>
     <div class="row" style="margin-top:8px"><button class="btn ghost" id="fillp">Fill year-end prices and market caps from Yahoo</button>
       <span class="muted" id="fillstat" style="align-self:center">${d.missing_prices ? d.missing_prices + " imported companies have no year-end prices yet" : ""}</span></div>
     <details style="margin-top:8px"><summary>Refresh current prices from a snapshot CSV (Ticker, Latest_Price)</summary>
@@ -554,12 +627,12 @@ async function scores() {
   const cell = x => x.score == null ? "–" : `<span class="${x.matches ? "gain" : ""}">${x.score.toFixed(0)}%</span>` +
     (x.coverage < 1 ? `<br><span class="muted" style="font-size:.8rem">${pct(x.coverage, 0)} of data</span>` : "");
   const mine = d.rows.filter(r => r.signal && r.signal !== null);
-  const order = {sell: 0, buy: 1, hold: 2, watch: 3};
+  const order = {review: 0, sell: 1, buy: 2, hold: 3, watch: 4};
   mine.sort((a, b) => order[a.signal] - order[b.signal] || a.symbol.localeCompare(b.symbol));
   const count = s => mine.filter(r => r.signal === s).length;
   main.innerHTML = `<h2>Scores &amp; shortlist</h2>
   <section class="box scroll"><h3 style="margin-top:0">Your shortlist and portfolio</h3>
-  <div class="legend"><span><span class="sig sell">Sell</span> ${count("sell")} · you hold it but it matches no philosophy, or it costs more than your limit (Settings → price discipline)</span>
+  <div class="legend"><span><span class="sig review">Review data</span> ${count("review")} · missing, stale, provisional or unvalued inputs</span><span><span class="sig sell">Sell</span> ${count("sell")} · you hold it but it matches no philosophy, or it costs more than your limit (Settings → price discipline)</span>
     <span><span class="sig buy">Buy</span> ${count("buy")} · shortlisted, not held, matches, and priced within your limit</span>
     <span><span class="sig hold">In portfolio</span> ${count("hold")} · held and still matches</span>
     <span><span class="sig watch">Watching</span> ${count("watch")} · shortlisted, but not matching or too expensive right now</span></div>
@@ -568,15 +641,15 @@ async function scores() {
       ${r.held ? `<br><span class="muted">${r.quantity} shares</span>` : ""}</td>
     <td class="l">${sigChip(r.signal, r.signal_note)}</td>
     <td>${r.price == null ? "–" : srcSpan(inr(r.price), r.src?.price) + `<br><span class="muted" style="font-size:.8rem">${esc(r.price_date || "")}</span>`}</td>
-    <td>${trigger(r.headroom)}</td>
+    <td>${r.signal === "review" ? "Review inputs first" : trigger(r.headroom)}</td>
     <td>${valueCell(r.value_multiple, d.price_discipline)}</td>
     <td>${r.pe == null ? "–" : srcSpan(r.pe.toFixed(1), r.src?.pe)}</td><td>${retCell(r, "roce")}</td>
     ${r.error ? `<td class="l muted" colspan="4">${esc(r.error)}</td>` : `<td>${cell(r.buffett)}</td><td>${cell(r.munger)}</td><td>${cell(r.lynch)}</td>
     <td class="l" style="white-space:normal">${esc(r.signal_note[0].toUpperCase() + r.signal_note.slice(1))}${r.matches.length ? "" :
       ". Fails: " + esc([...new Set(["buffett", "munger", "lynch"].flatMap(k => r[k].failed))].slice(0, 3).join(", ") || "below the pass mark")}</td>`}</tr>`).join("")}</tbody></table>`
     : '<p class="muted">Nothing shortlisted or held yet. Shortlist stocks below or on the Top 250 page, or record purchases on My portfolio.</p>'}
-  <p class="muted" style="font-size:.867rem">A signal is a prompt to look closer, not an instruction: it uses today's price and the latest imported financials.
-  Every change of signal is recorded in the Recommendation log.</p></section>
+  <p class="muted" style="font-size:.867rem">A signal is a prompt to look closer, not an instruction: it uses the last saved price and imported financials.
+  The monitor records status changes and sends them to your connected alert channels.</p></section>
   <h3>All imported companies</h3>
   <p class="lead">Ranked by how many philosophies each matches (pass mark ${d.pass_score}%), then total score.
   Where some data was missing, the share of the test that ran is shown underneath.</p>
@@ -637,7 +710,7 @@ async function pollJob() {
 // ---- recommendation log
 const REASONS = {shortlisted: "Shortlisted", removed_from_shortlist: "Removed from shortlist", alert_dip: "Alert: news-linked drop",
   alert_levelled: "Alert: levelled out", bought: "Bought", sold: "Sold", trades_imported: "Zerodha trades imported",
-  signal_buy: "Signal: Buy", signal_sell: "Signal: Sell"};
+  signal_buy: "Signal: Buy", signal_sell: "Signal: Sell", signal_review: "Signal: Review data", signal_hold: "Signal: Hold", signal_watch: "Signal: Watch"};
 async function ledger(sym) {
   const d = await guard(() => api("/api/recommendations" + (sym ? "?symbol=" + encodeURIComponent(sym) : ""))); if (!d) return;
   const sc = x => x == null ? "–" : x.toFixed(0) + "%";
@@ -696,12 +769,13 @@ async function settings() {
       <span style="font-size:.8rem">updated automatically every day; not part of presets or undo</span></label>
     ${f("equity_premium", "Equity premium", "added to G-Sec for the discount rate")}
     ${f("terminal_growth", "Long-run growth", "after the 10-year period")}
+    ${f("entry_margin_of_safety", "Entry margin of safety", "-1 keeps legacy rule; 0.25 requires a 25% discount; holdings use separate exit rules", "0.05")}
     ${f("pass_score", "Pass mark (%)", "a philosophy matches at or above this", "1")}
     ${f("min_coverage", "Minimum data coverage", "0.7 = 70% of the test must run", "0.05")}
     ${f("large_cap_min_cr", "Large-cap floor (₹ cr)", "from AMFI's latest list", "1")}
     ${f("mid_cap_min_cr", "Mid-cap floor (₹ cr)", "from AMFI's latest list", "1")}
     <label title="Scores and matches are unchanged; this only affects the Buy / Sell colours and price triggers">Price discipline for Buy/Sell
-      <select name="price_discipline">${[[0, "Off"], [3, "Above 3x value (lenient)"], [2, "Above 2x value (recommended)"], [1.5, "Above 1.5x value (strict)"]]
+      <select name="price_discipline">${[[0, "Off"], [3, "Above 3x value (lenient)"], [2, "Above 2x value (legacy default)"], [1.5, "Above 1.5x value (strict)"]]
         .map(([v, l]) => `<option value="${v}" ${+s.price_discipline === v ? "selected" : ""}>${l}</option>`).join("")}
         ${[0, 3, 2, 1.5].includes(+s.price_discipline) ? "" : `<option value="${s.price_discipline}" selected>Above ${s.price_discipline}x value</option>`}</select>
       <span style="font-size:.8rem">a held stock priced above this multiple of its estimated value shows Sell; a shortlisted one can't show Buy</span></label>
@@ -737,10 +811,16 @@ async function settings() {
       .map(([k, l, h, step]) => `<label>${l}<input type="number" step="${step}" name="${k}" value="${d.alerts[k]}">
         <span style="font-size:.8rem">${h} · default ${d.alert_defaults[k]}</span></label>`).join("")}
       <button class="btn">Save alert sensitivity</button><button type="button" class="btn ghost" id="aldef">Back to defaults</button></form></section>
+  <section class="box"><h3 style="margin-top:0">Connect your Telegram</h3>
+    <p>Create a dedicated bot with Telegram's verified @BotFather using /newbot. Paste its token here, then open the generated link on your phone and tap Start. The link expires in ten minutes. To send alerts to a group, send <code>/setgroup@your_bot_username</code> in that group from the Telegram account you linked. Send <code>/privatealerts</code> to your bot in the DM to switch back.</p>
+    <form id="tgpair" class="row"><label>Bot token<input type="password" name="token" autocomplete="off" required size="44"></label>
+    <button class="btn">Create phone linking link</button></form>
+    <p id="tgresult" role="status"></p><p id="tgstate" class="muted"></p>
+    <button class="btn ghost" id="tgdisconnect">Disconnect paired bot</button>
+    <p class="muted">Commands: /status, /stock INFY, /news INFY, /portfolio, /risk, /quality, /feedback ID useful. Monitoring runs while the app or monitor service is running. Stories are preliminary information, not trading instructions.</p>
+  </section>
   <section class="box"><h3 style="margin-top:0">Alerts</h3><form class="row" id="nt">
     <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="windows_toast" ${d.windows_toast ? "checked" : ""}> Windows pop-up notifications</label>
-    <label>Telegram bot token<input name="telegram_bot_token" placeholder="${d.telegram_configured ? "saved (enter to replace)" : "optional"}" size="30"></label>
-    <label>Telegram chat ID<input name="telegram_chat_id" placeholder="optional" size="14"></label>
     <label>ntfy topic (phone app)<input name="ntfy_topic" value="${esc(d.ntfy_topic || "")}" placeholder="e.g. screener-k7q2m9x4" size="22" autocomplete="off">
       <span style="font-size:.8rem">leave blank to turn off</span></label>
     <label>ntfy server<input name="ntfy_server" value="${esc(d.ntfy_server || "https://ntfy.sh")}" size="18"></label>
@@ -748,6 +828,24 @@ async function settings() {
 </label>
     ${d.discord_configured ? '<label style="flex-direction:row;align-items:center;gap:.3rem"><input type="checkbox" name="discord_remove"> Remove the saved Discord webhook</label>' : ""}
     <button class="btn">Save alert settings</button><button type="button" class="btn ghost" id="test">Send a test alert</button></form></section>`;
+  $("#tgpair").onsubmit = e => { e.preventDefault(); guard(async () => {
+    const token = e.target.token.value; e.target.token.value = "";
+    const r = await api("/api/telegram/pair", {token});
+    $("#tgresult").innerHTML = `<a href="${esc(r.url)}" target="_blank" rel="noopener">Open your bot and tap Start</a><br><span>On your phone, open your bot and send /start ${esc(new URL(r.url).searchParams.get("start"))}</span>`;
+  }); };
+  $("#tgdisconnect").onclick = () => guard(async () => { await api("/api/telegram/disconnect", {}); $("#tgresult").textContent = "Disconnected"; });
+  const telegramStatusElement = $("#tgstate");
+  const checkTelegram = async () => {
+    if ($("#tgstate") !== telegramStatusElement) return;
+    const t = await api("/api/telegram").catch(() => null);
+    if (t && $("#tgstate") === telegramStatusElement) {
+      $("#tgstate").textContent = (t.linked ? "Connected to @" + t.username + (t.group_linked ? " · Alerts go to group “" + t.group_title + "”" : " · Alerts go to your private chat") : t.pairing ? "Waiting for Start from your phone…" : "Not linked") +
+        (t.monitor.running ? " · Monitor running" : " · Monitor stopped") + " · Pending deliveries: " + (t.monitor.delivery.pending || 0);
+      if (t.linked && $("#tgresult")) $("#tgresult").textContent = "Your Telegram account is linked.";
+      setTimeout(checkTelegram, 3000);
+    }
+  };
+  checkTelegram();
   $("#sc").onsubmit = e => { e.preventDefault(); guard(async () => {
     await api("/api/settings", {scoring: Object.fromEntries(new FormData(e.target))}); status("Scoring settings saved"); settings(); }); };
   $("#al").onsubmit = e => { e.preventDefault(); guard(async () => {
@@ -766,7 +864,7 @@ async function settings() {
   $("#nt").onsubmit = e => { e.preventDefault(); guard(async () => { const b = Object.fromEntries(new FormData(e.target));
     b.windows_toast = e.target.windows_toast.checked; await api("/api/settings", b); status("Alert settings saved"); settings(); }); };
   $("#test").onclick = () => guard(async () => { const r = await api("/api/notify-test", {});
-    status(r.problems.length ? r.problems.join("; ") : "Test alert sent", r.problems.length > 0); });
+    status(r.problems.length ? r.problems.join("; ") : "Test alert queued — check your phone and delivery status", r.problems.length > 0); });
 }
 
 // ---- help manual (the (?) button, top right)
@@ -793,7 +891,7 @@ function help() {
   <ul><li><b>Every weekday (18:30):</b> today's official NSE closing prices for all companies (Yahoo as backup); the 10-year G-Sec yield;
   news for your shortlist and holdings; drop and levelling-out checks; Buy/Sell signal changes; a daily report.</li>
   <li><b>Weekly:</b> promoter %, pledge %, FII + DII % (Screener.in / NSE filings), lenders' Gross NPA %, and any missing year-end prices.</li>
-  <li><b>Weekly in results season</b> (May–June and November–December): every company's financial statements are re-read from Screener.in, so new
+  <li><b>Weekly throughout the year</b>: every company's financial statements are re-read from Screener.in, so new
   annual and quarterly results flow into the scores. You can also start this from Top 250 → import &amp; update data.</li>
   <li>Anything you type in yourself is never overwritten by these updates.</li></ul>
 

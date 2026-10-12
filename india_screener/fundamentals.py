@@ -223,8 +223,8 @@ def metrics(rec):
     other_inc, shares = _get(s, "other_income"), _get(s, "shares_cr")
 
     eq = [(_at(cap, i) + _at(res, i)) if _ok(_at(cap, i), _at(res, i)) else None for i in range(n)]
-    ce = [(eq[i] + (_at(debt, i) or 0)) if eq[i] is not None else None for i in range(n)]
-    ebit = [(_at(pbt, i) + (_at(intr, i) or 0)) if _at(pbt, i) is not None else None for i in range(n)]
+    ce = [(eq[i] + debt[i]) if _ok(eq[i], _at(debt, i)) else None for i in range(n)]
+    ebit = [(_at(pbt, i) + intr[i]) if _ok(_at(pbt, i), _at(intr, i)) else None for i in range(n)]
 
     def avg_base(lst, i):
         cur, prev = _at(lst, i), _at(lst, i - 1)
@@ -247,7 +247,7 @@ def metrics(rec):
         t, p = _at(tax, i), _at(pbt, i)
         return min(0.40, max(0.0, t / p)) if _ok(t, p) and p > 0 else 0.2517
 
-    ic = [(ce[i] - (_at(cash, i) or 0)) if ce[i] is not None else None for i in range(n)]
+    ic = [(ce[i] - cash[i]) if _ok(ce[i], _at(cash, i)) else None for i in range(n)]
     roic = [(ebit[i] * (1 - tax_rate(i)) / avg_base(ic, i)) if _ok(ebit[i], avg_base(ic, i)) and avg_base(ic, i) > 0 else None
             for i in range(n)]
     capex_est = [(_at(nb, i) - _at(nb, i - 1) + (_at(cwip, i) or 0) - (_at(cwip, i - 1) or 0) + _at(dep, i))
@@ -283,17 +283,22 @@ def metrics(rec):
         if last_v <= 0:
             return -1.0          # ended at a loss: growth test fails outright
         if first <= 0:
-            return 0.0           # growth from a loss base is undefined; give it no credit
+            return None          # growth from a loss base is undefined, not zero growth
         return cagr(first, last_v, idx[-1] - idx[0])
+
+    def paired_ratio(a, b, k, minimum=3):
+        pairs = [(_at(a, i), _at(b, i)) for i in range(max(0, n-k), n) if _ok(_at(a, i), _at(b, i))]
+        denominator = sum(y for _, y in pairs)
+        return sum(x for x, _ in pairs) / denominator if len(pairs) >= minimum and denominator > 0 else None
 
     last = n - 1
     m = {
         "years": years, "n_years": n, "capex_source": capex_source,
         "roe": roe, "roce": roce, "roic": roic, "roa": roa, "eps": eps, "bvps": bvps, "fcf": fcf, "capex": capex, "equity": eq,
         "ebit_margin": [ebit[i] / sales[i] if _ok(ebit[i], _at(sales, i)) and sales[i] > 0 else None for i in range(n)],
-        "de_ratio": [(_at(debt, i) or 0) / eq[i] if eq[i] and eq[i] > 0 else None for i in range(n)],
+        "de_ratio": [debt[i] / eq[i] if eq[i] and eq[i] > 0 and _at(debt, i) is not None else None for i in range(n)],
         "interest_cover": (ebit[last] / intr[last]) if _ok(ebit[last], _at(intr, last)) and intr[last] > 0 else
-                          (math.inf if ebit[last] is not None and ebit[last] > 0 else None),
+                          (math.inf if _at(intr, last) == 0 and ebit[last] is not None and ebit[last] > 0 else None),
         "price": price, "market_cap": mcap, "shares_cr": shares_now,
         "net_profit_last": _at(np_, last),
         "pe": (mcap / np_[last]) if _ok(mcap, _at(np_, last)) and np_[last] > 0 else None,
@@ -306,11 +311,8 @@ def metrics(rec):
         "bvps_cagr_5": span_cagr(bvps, 5, "bvps_cagr_5", 3),
         "recv_cagr_5": span_cagr(recv, 5, "recv_cagr_5", 3), "inv_cagr_5": span_cagr(inv, 5, "inv_cagr_5", 3),
         "shares_cagr_5": span_cagr(shares, 5, "shares_cagr_5", 3),
-        "cash_conversion": (sum(window(cfo, 5)) / sum(window(np_, 5)))
-                           if window(cfo, 5) and window(np_, 5) and sum(window(np_, 5)) > 0
-                           and len(window(cfo, 5)) == len(window(np_, 5)) else None,
-        "capex_to_cfo": (sum(window(capex, 5)) / sum(window(cfo, 5)))
-                        if window(capex, 5) and window(cfo, 5) and sum(window(cfo, 5)) > 0 else None,
+        "cash_conversion": paired_ratio(cfo, np_, 5),
+        "capex_to_cfo": paired_ratio(capex, cfo, 5),
         "fcf_avg_3": statistics.fmean(window(fcf, 3)) if len(window(fcf, 3)) == 3 else None,
         "fcf_median_all": statistics.median(window(fcf, 10)) if len(window(fcf, 10)) >= 3 else None,
         "fcf_conversion": (lambda pr: sum(f for f, _ in pr) / sum(p for _, p in pr)
@@ -318,16 +320,19 @@ def metrics(rec):
             [(fcf[i], np_[i]) for i in range(max(0, n - 5), n) if _ok(fcf[i], _at(np_, i))]),
         "losses": sum(1 for v in np_ if v is not None and v <= 0),
         "np_years": sum(1 for v in np_ if v is not None),
-        "other_income_share": (sum(window(other_inc, 3)) / sum(window(pbt, 3)))
-                              if window(other_inc, 3) and window(pbt, 3) and sum(window(pbt, 3)) > 0 else None,
-        "tax_rate_avg": (lambda t, p: sum(t) / sum(p) if t and p and sum(p) > 0 and len(t) == len(p) else None)(
-            window(_get(s, "tax"), 5), window(pbt, 5)),
+        "other_income_share": paired_ratio(other_inc, pbt, 3),
+        "tax_rate_avg": paired_ratio(_get(s, "tax"), pbt, 5),
     }
     # Trailing twelve months from the last 4 quarters, if they run past the last annual report.
     q = rec.get("quarters") or {}
     qd, qnp, qs = q.get("dates", []), q.get("net_profit", []), q.get("sales", [])
     m["ttm"] = None
-    if len(qd) >= 4 and all(v is not None for v in qnp[-4:]) and qd[-1] > years[-1]:
+    try:
+        quarter_dates = [dt.date.fromisoformat(d) for d in qd[-4:]]
+        contiguous = len(quarter_dates) == 4 and all(80 <= (b-a).days <= 100 for a,b in zip(quarter_dates, quarter_dates[1:]))
+    except ValueError:
+        contiguous = False
+    if contiguous and len(qnp) == len(qd) and all(v is not None for v in qnp[-4:]) and qd[-1] > years[-1]:
         m["ttm"] = {"to": qd[-1], "net_profit": sum(qnp[-4:]),
                     "sales": sum(qs[-4:]) if len(qs) >= 4 and all(v is not None for v in qs[-4:]) else None}
         if mcap and m["ttm"]["net_profit"] > 0:

@@ -12,6 +12,7 @@ Every threshold here is a judgement about the philosophy, written out so you can
 import math
 import re
 import statistics
+import datetime as dt
 
 from . import config
 
@@ -27,6 +28,7 @@ DEFAULT_SETTINGS = {
     # Price discipline for the Buy/Sell signals (not the scores): above this multiple of the conservative value
     # estimate a held stock shows Sell and a shortlisted one can't show Buy. 0 = off.
     "price_discipline": 2.0,
+    "entry_margin_of_safety": -1.0,  # -1 preserves legacy entry rule; otherwise require 1-price/value >= this
 }
 
 
@@ -40,7 +42,24 @@ def valuation(m, rec, st):
         value, note = dcf_value(m, st, cyclical=lynch_category(m, rec, st) == "cyclical")
         method = "discounted free cash flow"
     mult = (m["market_cap"] / value) if value and value > 0 and m.get("market_cap") else None
-    return {"value_cr": value, "multiple": mult, "method": method, "note": note}
+    return {"value_cr": value, "multiple": mult, "method": method, "note": note,
+            "limitation": 'Approximate screening valuation; cash-flow classification and discount-rate calibration need review.'
+            if rec['sector_type']=='general' else 'Simplified book-value model; not a sector-specific appraisal.'}
+
+
+def sensitivity(rec, st=None):
+    """Assumption sensitivity, never probabilities, price targets or replacement signals."""
+    st = st or settings()
+    m = fundamentals_metrics(rec, None, st)
+    rows = []
+    for label, shift in [('higher required return',.02),('current assumptions',0),('lower required return',-.02)]:
+        altered = {**st, 'equity_premium':max(0, st['equity_premium']+shift)}
+        value = valuation(m,rec,altered)
+        rows.append({'scenario':label, 'discount_rate':altered['risk_free']+altered['equity_premium']+(0 if rec['sector_type']=='general' else .01),
+                     'value_cr':value['value_cr'],'value_per_share':value['value_cr']/m['shares_cr'] if value['value_cr'] is not None and m.get('shares_cr') else None,
+                     'margin_of_safety':margin_of_safety(value['value_cr'],m['market_cap']), 'assumptions':value['note']})
+    return {'symbol':rec['symbol'],'scenarios':rows, 'limitation':valuation(m,rec,st)['limitation'],
+            'note':'Discount-rate sensitivity of the existing model, with growth caps applied by that model. These are not calibrated bear/base/bull forecasts and do not change the active signal.'}
 
 
 def settings():
@@ -105,6 +124,8 @@ def dcf_value(m, st, cyclical=False):
         return None, "free cash flow unavailable"
     if base <= 0:
         return 0.0, "average free cash flow is not positive"
+    if m.get('debt') is None or m.get('cash') is None:
+        return None, 'debt or cash unavailable; equity value cannot be estimated'
     g_hist = [g for g in (m.get("eps_cagr_10"), m.get("eps_cagr_5")) if g is not None]
     g1 = max(0.0, min(min(g_hist) if g_hist else 0.0, st["max_stage1_growth"]))
     r = st["risk_free"] + st["equity_premium"]
@@ -114,7 +135,7 @@ def dcf_value(m, st, cyclical=False):
         cf *= 1 + g1
         pv += cf / (1 + r) ** t
     pv += cf * (1 + gt) / (r - gt) / (1 + r) ** 10
-    value = pv - (m.get("debt") or 0) + (m.get("cash") or 0)
+    value = pv - m['debt'] + m['cash']
     basis = "median FCF across the cycle" if cyclical else "3y avg FCF"
     return value, f"{basis} {num(base, 0)} cr, growth {pct(g1)} for 10y then {pct(gt)}, discount {pct(r)}"
 
@@ -149,7 +170,7 @@ def buffett(m, rec, st):
     frac15 = sum(r >= 0.15 for r in roe) / len(roe) if len(roe) >= 4 else None
     out = [C("roe_consistency", "ROE >= 15% in most years", 20, linear(frac15, 0.3, 0.8) if frac15 is not None else None,
              f"{pct(frac15, 0)} of {len(roe)} years", "full marks if >=80% of years, zero at 30%"),
-           C("no_losses", "No loss years", 5, 1.0 if m["losses"] == 0 else 0.0 if m["np_years"] else None,
+           C("no_losses", "No loss years", 5, (1.0 if m["losses"] == 0 else 0.0) if m["np_years"] else None,
              f"{m['losses']} loss year(s)", "any loss year scores zero"),
            C("eps_growth", "Long-run EPS growth", 10,
              linear(m["eps_cagr_10"] if m["eps_cagr_10"] is not None else m["eps_cagr_5"], 0.0, 0.12),
@@ -401,7 +422,7 @@ def summarise(criteria, st, philosophy=None):
             "criteria": criteria}
 
 
-def price_headroom(rec, st=None, size_rank=None):
+def price_headroom(rec, st=None, size_rank=None, entry=False):
     """How far the share price can move before the Buy/Sell picture changes, all else equal.
     If the stock matches a philosophy now: the rise at which it would match none (the Sell point).
     If it matches none: the fall at which it would start matching (the Buy point), or None when no
@@ -409,6 +430,10 @@ def price_headroom(rec, st=None, size_rank=None):
     Valuation tests (margin of safety, P/E, PEG, FCF yield, P/B) move with price; quality tests don't."""
     meta = rec.get("meta") or {}
     if not meta.get("market_cap") and not meta.get("price"):
+        return None
+    st = st or settings()
+    if entry and st.get('entry_margin_of_safety',-1) >= 0:
+        # A separate valuation ceiling is displayed elsewhere; do not label the legacy quality boundary a Buy trigger.
         return None
     price = meta.get("price")
     cache = {}
@@ -515,6 +540,26 @@ def score_company(rec, st=None, size_rank=None, headroom=False):
                          **{k: _last(m[k]) for k in ("roce", "roic", "roe")},
                          **{k + "_5y": med5(k) for k in ("roce", "roic", "roe")}}
     result["valuation"] = valuation(m, rec, st)
+    issues = []
+    today = config.now_ist().date()
+    meta = rec.get("meta") or {}
+    if rec['years'] != sorted(set(rec['years'])):
+        issues.append('annual periods are duplicated or out of order')
+    qdates = (rec.get('quarters') or {}).get('dates', [])
+    if qdates and (qdates != sorted(set(qdates)) or qdates[-1] > today.isoformat()):
+        issues.append('quarterly periods are duplicated, out of order or future-dated')
+    for label, value, max_days in (("price", meta.get("price_date") or meta.get("market_cap_date"), 7),
+                                   ("annual financials", rec["years"][-1], 450)):
+        try:
+            age = (today - dt.date.fromisoformat(str(value)[:10])).days
+            if age < 0 or age > max_days:
+                issues.append(f"{label} dated {value} is outside the freshness limit")
+        except (ValueError, TypeError):
+            issues.append(f"{label} date missing or invalid")
+    if not any(result[k]["reliable"] and not result[k]["unknown_essentials"] for k in ("buffett", "munger", "lynch")):
+        issues.append("insufficient essential financial data")
+    result["data_quality"] = {"issues": issues, "checked_at": today.isoformat()}
+    result["algorithm_version"] = "2.1"
     matched = [k for k in ("buffett", "munger", "lynch") if result[k]["matches"]]
     result["matches"] = matched
     result["all_three"] = len(matched) == 3
@@ -541,5 +586,5 @@ def score_company(rec, st=None, size_rank=None, headroom=False):
     result["industry"] = rec.get("industry")
     result["warnings"] = warnings
     if headroom:
-        result["headroom"] = price_headroom(rec, st, size_rank)
+        result["headroom"] = None if issues or result['provisional'] else price_headroom(rec, st, size_rank)
     return result

@@ -20,7 +20,7 @@ class Api(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name)
         cls.patches = [mock.patch.object(config, k, v) for k, v in {
-            "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
+            "ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
             "DB_PATH": root / "db.sqlite", "SHORTLIST_PATH": root / "shortlist.json", "CONFIG_PATH": root / "config.json"}.items()]
         stock, bench = make_series(n=320)
         cls.patches += [mock.patch("india_screener.prices.history", lambda s, e="NSE", **k: stock),

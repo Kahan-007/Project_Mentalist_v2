@@ -67,6 +67,14 @@ class Dip(unittest.TestCase):
 
 
 class Levelling(unittest.TestCase):
+    def test_repeated_low_restarts_stability_clock(self):
+        stock, bench = make_series(n=330, shocks={300: -0.09}, calm_after=302, seed=11)
+        for i in (300, 329):
+            stock[i]['low'] = stock[i]['close']/stock[i]['adjclose']
+        result = ev.assess_levelling(stock, bench, stock[300]['date'], EV, LV)
+        self.assertEqual(result['trough_date'], stock[-1]['date'])
+        self.assertFalse(result['checks']['base_held'])
+
     def test_not_levelled_too_soon(self):
         stock, bench = make_series(n=305, shocks={300: -0.09})
         res = ev.assess_levelling(stock, bench, stock[300]["date"], EV, LV)

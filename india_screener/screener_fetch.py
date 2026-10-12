@@ -180,7 +180,16 @@ def merge_refresh(new, old):
     oq, nq = (old.get("quarters") or {}).get("dates") or [], (new.get("quarters") or {}).get("dates") or []
     newer_quarter = bool(nq) and (not oq or nq[-1] > oq[-1])
     if is_export and not newer_year:
+        if newer_quarter:
+            import copy
+            merged = copy.deepcopy(old)
+            merged['quarters'] = new['quarters']
+            merged['quarter_source'] = new.get('source')
+            merged['imported_at'] = config.now_ist().isoformat()
+            return merged, 'new quarter ' + nq[-1][:7] + '; preserved imported annual statements'
         return None, "kept your Screener export (Screener has no newer annual year)"
+    if oq and (not nq or oq[-1] > nq[-1]):
+        new['quarters'] = old['quarters']
     for k in ("manual", "manual_source", "mcap_rank", "screener_industry"):
         if old.get(k) is not None:
             new[k] = old[k]

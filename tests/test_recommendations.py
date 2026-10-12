@@ -14,7 +14,7 @@ class RecommendationLog(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        for k, v in {"DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
+        for k, v in {"ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
                      "DB_PATH": root / "db.sqlite", "SHORTLIST_PATH": root / "shortlist.json",
                      "CONFIG_PATH": root / "config.json"}.items():
             p = mock.patch.object(config, k, v)

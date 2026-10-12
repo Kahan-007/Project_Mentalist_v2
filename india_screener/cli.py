@@ -225,6 +225,12 @@ def cmd_daily(a):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="india_screener", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser('monitor', help='continuous news monitoring and Telegram commands')
+    s.set_defaults(fn=lambda a: __import__('india_screener.monitor', fromlist=['run']).run())
+    s = sub.add_parser('service', help='macOS login service for dashboard, monitor and weekday daily job')
+    s.add_argument('action', choices=['install', 'show', 'remove'])
+    s.add_argument('--port', type=int, default=8766)
+    s.set_defaults(fn=lambda a: __import__('india_screener.service', fromlist=['manage']).manage(a.action, a.port))
     s = sub.add_parser("check", help="smoke-test every data source")
     s.add_argument("symbol", nargs="?", default="INFY")
     s.set_defaults(fn=cmd_check)

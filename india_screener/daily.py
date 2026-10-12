@@ -3,7 +3,7 @@ import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import appnotify, autofill, config, news, price_snapshot, recommendations, notify, portfolio, prices, shortlist, tracker, universe
+from . import appnotify, autofill, config, news, price_snapshot, recommendations, notify, outbox, portfolio, prices, shortlist, tracker, universe
 
 
 def watchlist():
@@ -48,7 +48,7 @@ def format_alert(a, item):
         lines.append("You hold this stock.")
     for h in heads[:4]:
         cats = ", ".join(json.loads(h["categories"])) or "uncategorised"
-        lines.append(f"- {h['title']} ({h['source']}; {cats})")
+        lines.append(f"- {h['title']} ({h['source']}; {cats})\n{h['url']}")
     lines.append("A same-session drop is evidence of the market reacting, not proof that this headline caused it.")
     return title, "\n".join(lines)
 
@@ -86,7 +86,7 @@ def run(cfg=None, send_alerts=True):
                 bars_by_symbol[sym] = bars
                 tracker.store_news(sym, heads)
                 tracker.group_into_events(sym, it["exchange"], trading_dates)
-                for a in tracker.evaluate(sym, bars, bench, cfg):
+                for a in tracker.evaluate(sym, bars, bench, cfg, publish=send_alerts):
                     alerts.append((a, it))
             except Exception as exc:
                 errors[sym] = f"{type(exc).__name__}: {exc}"
@@ -96,8 +96,7 @@ def run(cfg=None, send_alerts=True):
     formatted = [format_alert(a, it) for a, it in alerts]
     send_problems = set()
     if send_alerts:
-        for title, body in formatted:
-            send_problems.update(notify.send(title, body, cfg) or [])
+        send_problems.update(outbox.flush(cfg))
     for (a, it), (title, body) in zip(alerts, formatted):
         appnotify.stock(title, body, symbol=a["symbol"])
         recommendations.safe_record(a["symbol"], "alert_" + a["type"], note=f"{title}\n{body}",
@@ -105,7 +104,7 @@ def run(cfg=None, send_alerts=True):
     if send_problems:
         errors["pop-up / Telegram delivery"] = "; ".join(sorted(send_problems))
     analyses = {it["symbol"]: recommendations.analyse(it["symbol"]) for it in items}
-    recommendations.log_signal_changes(items, analyses)
+    recommendations.log_signal_changes(items, analyses, publish=send_alerts)
     path = write_report(today, bench, items, bars_by_symbol, formatted, errors, analyses)
     for name, msg in errors.items():
         appnotify.program(*explain_error(name, msg), key=f"daily:{name}")

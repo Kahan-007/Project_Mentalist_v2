@@ -15,7 +15,7 @@ class TempData(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        for k, v in {"DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
+        for k, v in {"ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
                      "DB_PATH": root / "db.sqlite", "CONFIG_PATH": root / "config.json"}.items():
             p = mock.patch.object(config, k, v)
             p.start()
@@ -100,7 +100,10 @@ class Refresh(unittest.TestCase):
         old = rec(["2025-03-31", "2026-03-31"])
         self.assertIsNone(screener_fetch.merge_refresh(rec(["2024-03-31", "2025-03-31"]), old)[0])
         export = rec(["2025-03-31", "2026-03-31"], ["2026-03-31"], source="Infosys.xlsx")
-        self.assertIsNone(screener_fetch.merge_refresh(rec(["2025-03-31", "2026-03-31"], ["2026-06-30"]), export)[0])
+        out, reason = screener_fetch.merge_refresh(rec(["2025-03-31", "2026-03-31"], ["2026-06-30"]), export)
+        self.assertEqual(out["quarters"]["dates"], ["2026-06-30"])
+        self.assertEqual(out["series"], export["series"])
+        self.assertEqual(out["source"], "Infosys.xlsx")
 
 
 class ReturnsAndSources(unittest.TestCase):

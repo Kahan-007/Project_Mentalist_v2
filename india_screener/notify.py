@@ -25,8 +25,12 @@ def _toast(title, body):
 
 
 def _telegram(token, chat_id, text):
-    net.post_json(f"https://api.telegram.org/bot{token}/sendMessage",
-                  {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True})
+    from .telegram import call
+    result = call(token, "sendMessage", {"chat_id": chat_id, "text": text[:4000], "link_preview_options": {"is_disabled": True}})
+    if not isinstance(result, dict) or not result.get('message_id'):
+        from .telegram import TelegramError
+        raise TelegramError('missing delivery confirmation')
+    return result
 
 
 def _ntfy(server, topic, title, body):
@@ -39,36 +43,32 @@ def _discord(webhook, title, body):
     net.post_json(webhook, {"content": f"**{title[:200]}**\n{body}"[:1990], "allowed_mentions": {"parse": []}})
 
 
-def send(title, body, cfg=None):
-    cfg = cfg or config.load_config()
-    config.ensure_dirs()
-    stamp = config.now_ist().strftime("%Y-%m-%d %H:%M")
-    with open(config.LOGS / "alerts.log", "a", encoding="utf-8") as f:
-        f.write(f"[{stamp}] {title}\n{body}\n\n")
-    print(f"ALERT: {title}\n{body}\n")
-    problems = []
+def deliver(channel, destination, title, body, cfg):
     n = cfg["notify"]
-    if n.get("windows_toast") and sys.platform == "win32":
-        try:
-            _toast(title, body)
-        except Exception as exc:
-            problems.append(f"toast failed: {exc}")
-    if n.get("telegram_bot_token") and n.get("telegram_chat_id"):
-        try:
-            _telegram(n["telegram_bot_token"], n["telegram_chat_id"], f"{title}\n\n{body}")
-        except Exception as exc:
-            problems.append(f"telegram failed: {exc}")
-    if n.get("ntfy_topic"):
-        try:
-            _ntfy(n.get("ntfy_server") or "https://ntfy.sh", n["ntfy_topic"], title, body)
-        except Exception as exc:
-            problems.append(f"ntfy failed: {exc}")
-    if n.get("discord_webhook"):
-        try:
-            _discord(n["discord_webhook"], title, body)
-        except Exception as exc:
-            problems.append(f"discord failed: {exc}")
-    for p in problems:
+    if channel == "log":
+        config.ensure_dirs()
         with open(config.LOGS / "alerts.log", "a", encoding="utf-8") as f:
-            f.write(f"[{stamp}] NOTIFY PROBLEM: {p}\n")
-    return problems
+            f.write(f"[{config.now_ist().isoformat()}] {title}\n{body}\n\n")
+    elif channel == "telegram":
+        if str(n.get("telegram_chat_id")) != destination:
+            raise ValueError("Telegram recipient changed; queued delivery requires review")
+        _telegram(n["telegram_bot_token"], destination, f"{title}\n\n{body}")
+    elif channel == "toast":
+        _toast(title, body)
+    elif channel == "ntfy":
+        import json
+        server, topic = json.loads(destination)
+        _ntfy(server, topic, title, body)
+    elif channel == "discord":
+        import hashlib
+        if hashlib.sha256(n.get("discord_webhook", "").encode()).hexdigest() != destination:
+            raise ValueError("Discord destination changed")
+        _discord(n["discord_webhook"], title, body)
+    else:
+        raise ValueError("Unknown delivery channel")
+
+
+def send(title, body, cfg=None, key=None):
+    from . import outbox
+    outbox.enqueue(title, body, key, cfg)
+    return outbox.flush(cfg)

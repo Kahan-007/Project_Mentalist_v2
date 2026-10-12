@@ -10,7 +10,7 @@ automatically every day, so undoing, resetting or loading a preset never rolls i
 from . import config, scoring, storage
 
 KEYS = ("equity_premium", "terminal_growth", "pass_score", "min_coverage", "large_cap_min_cr", "mid_cap_min_cr",
-        "price_discipline")
+        "price_discipline", "entry_margin_of_safety")
 LIMIT = 100
 
 
@@ -32,6 +32,7 @@ def current():
 
 
 def _apply(values):
+    values = {'entry_margin_of_safety':scoring.DEFAULT_SETTINGS['entry_margin_of_safety'], **values}
     user = storage.read_json(config.CONFIG_PATH) or {}
     sc = user.setdefault("scoring", {})
     for k in KEYS:
