@@ -2,6 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
-data/
-config.json
-run_daily.cmd
+data/logs/
+data/monitor.lock
+data/monitor_status.json
+data/*.plist*
+data/screener.sqlite-wal
+data/screener.sqlite-shm

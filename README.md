@@ -101,3 +101,7 @@ Open **Monitor & risk** at http://127.0.0.1:8766/#quality for source health, hea
 - The monitor archives the statements, settings, algorithm version and analysis it actually observes. Future 20/60/120/252-session stock returns, benchmark-relative returns and maximum drawdown use cached adjusted daily data. They are descriptive observations, exclude trading costs and are not a profitability-validated strategy. Newly created archives need time before outcomes can exist.
 
 See [LONG_TERM_UPGRADE.md](LONG_TERM_UPGRADE.md) for scope, definitions, known limits and validation.
+
+## GitHub data snapshot
+
+This branch includes the app, imported fundamentals, cached market data, reports, portfolio transactions and research history as a dated snapshot. Telegram credentials, chat identities, runtime logs and machine-specific services are excluded. External delivery destinations in the uploaded database are redacted and pending external sends are cancelled. Link your own bot after cloning; never copy `.local/` into Git. Updates preserve the `telegram-group-alerts` branch history and leave the default branch unchanged.
