@@ -21,5 +21,11 @@
     "enabled": true,
     "poll_seconds": 60,
     "headline_max_age_minutes": 60
+  },
+  "news_alerts": {
+    "mode": "actionable",
+    "correlation_hours": 72,
+    "quote_max_age_minutes": 20,
+    "confirmations": 2
   }
 }

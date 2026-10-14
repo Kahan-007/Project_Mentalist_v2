@@ -25,7 +25,9 @@ def feedback(alert_id, rating, note=''):
     if len(note) > 1000:
         raise ValueError('Feedback note must be at most 1000 characters')
     with dbm.connect() as db:
-        if not db.execute('SELECT 1 FROM headline_audit WHERE alert_id=?', (int(alert_id),)).fetchone():
+        if not db.execute('SELECT 1 FROM headline_audit WHERE alert_id=? UNION ALL '
+                          "SELECT 1 FROM signal_news s JOIN alert_outbox a ON a.event_key='signal:' || s.recommendation_id "
+                          'WHERE a.id=?', (int(alert_id),int(alert_id))).fetchone():
             raise ValueError('That headline alert ID was not found')
         db.execute('INSERT INTO alert_feedback VALUES(?,?,?,?) ON CONFLICT(alert_id) DO UPDATE SET '
                    'rating=excluded.rating,note=excluded.note,updated_at=excluded.updated_at',
@@ -48,16 +50,18 @@ def report(days=7):
             LEFT JOIN alert_outbox a ON a.id=h.alert_id LEFT JOIN alert_feedback f ON f.alert_id=h.alert_id
             WHERE h.detected_at>=? ORDER BY h.detected_at DESC''', (cutoff,))]
         pending = db.execute("SELECT count(*),min(a.created_at) FROM alert_delivery d JOIN alert_outbox a ON a.id=d.alert_id WHERE d.status='pending' AND d.channel='telegram'").fetchone()
-    counts, ratings = {}, {}
+        ratings = {r['rating']:r['n'] for r in db.execute('SELECT f.rating,count(*) AS n FROM alert_feedback f '
+                   'JOIN alert_outbox a ON a.id=f.alert_id WHERE a.created_at>=? GROUP BY f.rating', (cutoff,))}
+    counts, delivered = {}, {}
     for r in rows:
         counts[r['disposition']] = counts.get(r['disposition'], 0)+1
-        if r['rating']:
-            ratings[r['rating']] = ratings.get(r['rating'], 0)+1
         r['publication_to_detection_seconds'] = r['detected_at']-r['published_at'] if r['published_at'] else None
         r['queue_to_delivery_seconds'] = r['sent_at']-r['created_at'] if r['sent_at'] else None
+        if r['alert_id'] is not None:
+            delivered[r['alert_id']] = r['queue_to_delivery_seconds']
     return {'days':days, 'counts':counts, 'feedback':ratings,
             'publication_to_detection':distribution([r['publication_to_detection_seconds'] for r in rows]),
-            'queue_to_delivery':distribution([r['queue_to_delivery_seconds'] for r in rows]),
+            'queue_to_delivery':distribution(delivered.values()),
             'pending_telegram':pending[0], 'oldest_pending_seconds':time.time()-pending[1] if pending[1] else None,
             'recent':rows[:100], 'note':'Latency starts at the source publication timestamp, which may be delayed or revised. Delivery means API acknowledgement, not phone display. Unseen/missed stories cannot be measured without a reference feed.'}
 

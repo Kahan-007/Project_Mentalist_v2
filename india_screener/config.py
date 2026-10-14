@@ -25,6 +25,12 @@ DEFAULTS = {
     "workers": 4,
     "news_lookback_days": 4,
     "monitor": {"enabled": True, "poll_seconds": 60, "headline_max_age_minutes": 60},
+    "news_alerts": {
+        "mode": "actionable",           # actionable | signals_only | all
+        "correlation_hours": 72,         # retain overnight/weekend news as possible context
+        "quote_max_age_minutes": 20,     # indicative quotes can be delayed
+        "confirmations": 2,              # distinct quote timestamps, not repeated cached prices
+    },
     "risk": {"max_stock_weight": 0, "max_sector_weight": 0},  # 0 = no user-defined limit
     "event": {
         "estimation_sessions": 120,      # market-model fit window before the event

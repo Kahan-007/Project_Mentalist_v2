@@ -25,7 +25,7 @@ async function monitorView() {
       ${d.monitor.sources.map(s => `<tr><td class="l">${esc(s.source)}</td><td>${esc(s.state)}</td><td>${esc(s.checked_at || 'Not checked')}</td></tr>`).join('')}</tbody></table>
       <p class="muted">The Mac must be awake and online. A running process does not by itself establish that every source is healthy.</p></section>
     <section class="box"><h3>Alert quality · last ${q.days} days</h3>
-      <p>Detected headline records: ${Object.values(q.counts).reduce((a,b)=>a+b,0)}. Newly queued: ${q.counts.queued || 0}; too old for push: ${q.counts.stale || 0}.</p>
+      <p>Detected headline records: ${Object.values(q.counts).reduce((a,b)=>a+b,0)}. Headline pushes: ${q.counts.queued || 0}; filtered: ${q.counts.filtered || 0}; linked to a signal change: ${q.counts['linked to signal'] || 0}; too old for a headline push: ${q.counts.stale || 0}.</p>
       <table><thead><tr><th class="l">Measured delay</th><th>Samples</th><th>Median</th><th>95th percentile</th></tr></thead><tbody>
       ${[['Publication to detection',q.publication_to_detection],['Queue to Telegram acknowledgement',q.queue_to_delivery]].map(([label,v]) => `<tr><td class="l">${label}</td><td>${v.samples}</td><td>${seconds(v.median_seconds)}</td><td>${seconds(v.p95_seconds)}</td></tr>`).join('')}</tbody></table>
       <p class="muted">${esc(q.note)} Feedback describes usefulness; it does not measure investment returns.</p>
@@ -649,7 +649,7 @@ async function scores() {
       ". Fails: " + esc([...new Set(["buffett", "munger", "lynch"].flatMap(k => r[k].failed))].slice(0, 3).join(", ") || "below the pass mark")}</td>`}</tr>`).join("")}</tbody></table>`
     : '<p class="muted">Nothing shortlisted or held yet. Shortlist stocks below or on the Top 250 page, or record purchases on My portfolio.</p>'}
   <p class="muted" style="font-size:.867rem">A signal is a prompt to look closer, not an instruction: it uses the last saved price and imported financials.
-  The monitor records status changes and sends them to your connected alert channels.</p></section>
+  The monitor separately checks indicative quotes; confirmed Buy/Sell changes appear in Telegram and the recommendation log with their own price timestamps. Settings → News alert filter controls pushes.</p></section>
   <h3>All imported companies</h3>
   <p class="lead">Ranked by how many philosophies each matches (pass mark ${d.pass_score}%), then total score.
   Where some data was missing, the share of the test that ran is shown underneath.</p>
@@ -685,8 +685,8 @@ let scoreSector = "";
 async function alerts() {
   const d = await guard(() => api("/api/events")); if (!d) return;
   main.innerHTML = `<h2>News alerts</h2>
-  <p class="lead">Once a day the program checks news for your shortlist and holdings. You get an alert when a stock falls abnormally
-  (beyond the Nifty and its normal swings) in the session its news came out, and again when the price has levelled out.</p>
+  <p class="lead">The daily check tracks abnormal news-session drops and later price stability. These events stay here and in the local log.
+  Phone alerts default to confirmed Buy/Sell changes with relevant news, plus serious holding risks. Choose the full event/headline feed in Settings → News alert filter.</p>
   <div class="row" style="margin-bottom:12px"><button class="btn" id="run">Run the daily check now</button>
   <span class="muted" id="jobinfo">${jobText(d.job)}</span></div>
   <section class="box scroll"><h3 style="margin-top:0">Events</h3>${d.events.length ? `<table><tbody>${d.events.map(evRow).join("")}</tbody></table>` : '<p class="muted">No events tracked yet.</p>'}</section>
@@ -817,7 +817,21 @@ async function settings() {
     <button class="btn">Create phone linking link</button></form>
     <p id="tgresult" role="status"></p><p id="tgstate" class="muted"></p>
     <button class="btn ghost" id="tgdisconnect">Disconnect paired bot</button>
-    <p class="muted">Commands: /status, /stock INFY, /news INFY, /portfolio, /risk, /quality, /feedback ID useful. Monitoring runs while the app or monitor service is running. Stories are preliminary information, not trading instructions.</p>
+    <p class="muted">Commands: /status, /alerts, /stock INFY, /news INFY, /portfolio, /risk, /quality, /feedback ID useful. Monitoring runs while the app or monitor service is running. Stories are preliminary information, not trading instructions.</p>
+  </section>
+  <section class="box"><h3 style="margin-top:0">News alert filter</h3>
+    <p>Receive a combined recommendation when the model changes to Buy/Sell or withdraws an earlier Buy/Sell. Alerts include the observed price, reason, an estimated crossed boundary when available, and relevant news published before that price. News stays searchable even when it does not trigger a push.</p>
+    <form id="newsfilter" class="row">
+      <label>Push notifications<select name="mode">${[
+        ['actionable','Actionable + serious holding risks (recommended)'],
+        ['signals_only','Buy/Sell changes and withdrawals only'],['all','All fresh headlines and model/event alerts']]
+        .map(([v,l])=>`<option value="${v}" ${d.news_alerts.mode===v?'selected':''}>${l}</option>`).join('')}</select></label>
+      <label>Distinct quote confirmations<input name="confirmations" type="number" min="1" max="5" step="1" value="${d.news_alerts.confirmations}"><span>2 reduces brief threshold flickers; completed daily checks are immediate.</span></label>
+      <label>Recent news window (hours)<input name="correlation_hours" type="number" min="1" max="168" step="1" value="${d.news_alerts.correlation_hours}"><span>72 includes overnight and weekend stories.</span></label>
+      <label>Maximum quote delay during market hours (minutes)<input name="quote_max_age_minutes" type="number" min="1" max="60" step="1" value="${d.news_alerts.quote_max_age_minutes}"></label>
+      <button class="btn">Save news filter</button>
+    </form>
+    <p class="muted">Indicative quotes may be delayed. Failed or stale quotes cannot generate a new price signal. A serious risk headline is a request to review a holding, not an automatic Sell. News does not change earnings assumptions; association with a threshold crossing does not establish cause. Daily drop/stability events remain in the dashboard and log in the two filtered modes.</p>
   </section>
   <section class="box"><h3 style="margin-top:0">Alerts</h3><form class="row" id="nt">
     <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="windows_toast" ${d.windows_toast ? "checked" : ""}> Windows pop-up notifications</label>
@@ -846,6 +860,10 @@ async function settings() {
     }
   };
   checkTelegram();
+  $('#newsfilter').onsubmit = e => { e.preventDefault(); guard(async () => {
+    await api('/api/settings', {news_alerts:Object.fromEntries(new FormData(e.target))});
+    status('News alert filter saved'); settings();
+  }); };
   $("#sc").onsubmit = e => { e.preventDefault(); guard(async () => {
     await api("/api/settings", {scoring: Object.fromEntries(new FormData(e.target))}); status("Scoring settings saved"); settings(); }); };
   $("#al").onsubmit = e => { e.preventDefault(); guard(async () => {

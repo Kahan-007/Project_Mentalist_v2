@@ -1,4 +1,4 @@
-> Subsequent long-term research improvements are documented in [LONG_TERM_UPGRADE.md](LONG_TERM_UPGRADE.md). The items below describe the initial Telegram implementation.
+> The 14 October 2026 decision-focused news filter is documented in [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md). It adds indicative quote threshold checks, combined news/recommendation alerts, confirmation across distinct quote timestamps, and configurable push suppression. Earlier research improvements are documented in [LONG_TERM_UPGRADE.md](LONG_TERM_UPGRADE.md). The items below describe the initial Telegram implementation.
 
 # Implementation status — 11 October 2026
 

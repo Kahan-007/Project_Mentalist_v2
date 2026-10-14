@@ -22,10 +22,10 @@ CREATE TABLE IF NOT EXISTS signal_state(symbol TEXT PRIMARY KEY, signal TEXT, up
 """
 
 
-def enqueue(title, body, key=None, cfg=None, db=None):
+def enqueue(title, body, key=None, cfg=None, db=None, push=True):
     if db is None:
         with dbm.connect() as conn:
-            return enqueue(title, body, key, cfg, conn)
+            return enqueue(title, body, key, cfg, conn, push=push)
     cfg = cfg or config.load_config()
     key = key or str(uuid.uuid4())
     db.execute("INSERT OR IGNORE INTO alert_outbox(event_key,title,body,created_at) VALUES(?,?,?,?)",
@@ -33,14 +33,14 @@ def enqueue(title, body, key=None, cfg=None, db=None):
     aid = db.execute("SELECT id FROM alert_outbox WHERE event_key=?", (key,)).fetchone()[0]
     n = cfg['notify']
     channels = {'log': 'local'}
-    if n.get('telegram_bot_token') and n.get('telegram_chat_id'):
+    if push and n.get('telegram_bot_token') and n.get('telegram_chat_id'):
         channels['telegram'] = str(n['telegram_chat_id'])
-    if n.get('ntfy_topic'):
+    if push and n.get('ntfy_topic'):
         channels['ntfy'] = json.dumps([n.get('ntfy_server', 'https://ntfy.sh'), n['ntfy_topic']])
-    if n.get('discord_webhook'):
+    if push and n.get('discord_webhook'):
         channels['discord'] = hashlib.sha256(n['discord_webhook'].encode()).hexdigest()
     import sys
-    if n.get('windows_toast') and sys.platform == 'win32':
+    if push and n.get('windows_toast') and sys.platform == 'win32':
         channels['toast'] = 'local'
     for channel, dest in channels.items():
         db.execute("INSERT OR IGNORE INTO alert_delivery(alert_id,channel,destination) VALUES(?,?,?)", (aid, channel, dest))

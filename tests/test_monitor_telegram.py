@@ -173,6 +173,7 @@ class Headlines(Isolated):
         self.assertIn('results', heads[0]['categories'])
 
     def test_fresh_alert_old_storage_duplicates_and_future(self):
+        self.cfg['news_alerts']['mode'] = 'all'  # explicitly exercise the legacy unfiltered feed
         now = config.now_ist()
         def head(title, minutes):
             return {'title':title, 'url':'https://example.com/'+title, 'source':'test', 'categories':[],

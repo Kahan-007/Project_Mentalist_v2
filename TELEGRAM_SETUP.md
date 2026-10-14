@@ -17,25 +17,41 @@ The pairing mechanism uses Telegram's [documented deep links](https://core.teleg
 |---|---|
 | `/help` | Available commands |
 | `/status` | Monitor state, source check times and pending deliveries |
+| `/alerts` | Active news filter, quote confirmations and news context window |
 | `/portfolio` | Holdings and average acquisition cost from your ledger |
 | `/risk` | Recorded-equity weights, data gaps and stock-limit warnings |
 | `/quality` | Measured headline alert counts and delivery latency |
 | `/feedback ID useful` | Rate a headline; also accepts noise, incorrect or duplicate |
-| `/stock KPITTECH` | Saved price/date, philosophy scores, current model label and explanation |
+| `/stock KPITTECH` | Last confirmed monitor observation with quote time, scores and reason; saved-price analysis if no monitor observation exists |
 | `/news TATAPOWER` | Recently stored headlines with links |
 
 Only the paired private Telegram user/chat can request this information. A group receives automatic alerts only after the paired user links it with `/setgroup`; command replies and private portfolio information remain in the paired DM. Other group members cannot link a group or request commands. Forwarded stories and third-party channels are not ingested as verified exchange announcements. Commands do not place orders or change the portfolio. `/feedback` saves your assessment locally; it does not retune investment rules.
 
 ## What arrives automatically
 
-- Fresh Google News headlines for holdings and shortlisted companies.
-- Official NSE corporate announcements when the issuer matches a tracked company name or explicit alias.
-- Model-status changes after local prices, financials, settings or freshness change. Initial observations establish a baseline without resending every existing label.
-- Daily confirmations of an abnormal drop or subsequent price stabilisation.
+The default **Actionable + serious holding risks** filter combines a changed Buy/Sell recommendation with its observed price, explanation, estimated crossed price boundary when the underlying inputs are unchanged, and up to three substantive recent headlines. Withdrawals of earlier Buy/Sell labels also arrive, so an earlier recommendation does not silently remain actionable. A model change is useful even without news; such alerts explicitly say they are not attributed to a headline. Initial observations establish a baseline without resending every existing label.
+
+Serious unqualified credit/governance language for a **recorded holding** is the one headline-only exception. It is a source-verification prompt, not an automatic Sell. Routine filings, allegations/denials and other headlines are stored without phone pushes unless a later model change gives them relevant context. The original exchange disclosure is shown before secondary reporting.
+
+Settings → **News alert filter** offers three modes, applied to Telegram and other configured push channels:
+
+| Mode | Phone alerts |
+|---|---|
+| Actionable + serious holding risks (default) | Buy/Sell changes and withdrawals, plus held-stock serious risk review |
+| Buy/Sell changes and withdrawals only | Same decision alerts, without headline-only exceptions |
+| All fresh headlines and model/event alerts | Legacy full feed, including daily abnormal-drop/stability notifications |
+
+Filtered news remains available through `/news SYMBOL` and Monitor & risk → recent headlines. All model transitions and daily drop/stability events remain in the local dashboard/log. Switching to a filtered mode cancels matching unsent push deliveries, while retaining commands and local logs; a delivery already in flight can still arrive. Switching back does not replay discarded history.
+
+Indicative Yahoo quotes are checked about once a minute for up to 20 tracked names, rotating larger lists with at most four concurrent requests. A price-driven intraday transition requires **two distinct increasing quote timestamps** by default. Repeated cached quotes do not count twice, and a move back across the threshold resets confirmation. Verified financial/settings/tracking changes and completed daily observations do not need intraday confirmation. Missing, future, non-finite, wrong-instrument or stale quotes cannot create a price recommendation. During weekday market hours (09:15–15:45 IST), the default quote age limit is 20 minutes; outside those hours, up to four calendar days is accepted to cover weekends. This is not an exchange holiday calendar or a guaranteed live feed.
+
+Quotes reprice a copy of the imported record for the same scoring/entry/exit rules used by the dashboard. They never rewrite financial statements, saved daily prices or historical candles. The Scores table continues using saved prices; `/stock`, the notification and the recommendation ledger expose the confirmed monitor observation separately. Daily event studies continue using completed sessions.
+
+The default news context window is **72 hours**, including stored news older than the direct-headline push cutoff. Only valid, substantive headlines published no later than the observed quote/close are eligible; routine, invalid, future and older-than-window items are excluded. Context is saved with the recommendation and settings. Timing is association, not proof the headline caused the move. News never automatically changes earnings, cash-flow or valuation assumptions.
 
 Google checks run roughly every 60 seconds for a small watchlist, plus request time. More than 20 names rotate through rounds. NSE checks run every five minutes in accordance with its RSS TTL. Processing and Telegram delivery add latency, as do source publication/indexing delays. This is not a guaranteed real-time market-data service.
 
-Alerts include source links and timestamps. Keyword labels such as “urgent review” are triage, not a verified finding of fraud/default or a trading decision. The app stores older headlines but only pushes ones no more than 60 minutes old; an extended outage can therefore leave historical news unpushed.
+Alerts include source links and timestamps. Keyword labels such as “urgent review” are triage, not a verified finding of fraud/default or a trading decision. Direct headline pushes (risk exceptions or All mode) require publication within 60 minutes; older stored news can still accompany a later decision within the separate context window. News detected after a decision was already delivered remains searchable; it does not retroactively prove causation or resend that decision.
 
 ## Keeping it running
 

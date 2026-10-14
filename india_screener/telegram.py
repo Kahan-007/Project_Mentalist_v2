@@ -92,7 +92,16 @@ def command(text):
     action = parts[0].split('@')[0].lower() if parts else ''
     sym = parts[1].strip().upper() if len(parts) > 1 else ''
     if action in ('/start', '/help'):
-        return 'Mentalist linked. Research commands: /status, /portfolio, /risk, /quality, /stock SYMBOL, /news SYMBOL. Rate a headline: /feedback ID useful (or noise, incorrect, duplicate). No orders are placed.'
+        return 'Mentalist linked. Research commands: /status, /alerts, /portfolio, /risk, /quality, /stock SYMBOL, /news SYMBOL. Rate a news-linked alert: /feedback ID useful (or noise, incorrect, duplicate). No orders are placed.'
+    if action == '/alerts':
+        from . import news_alerts
+        p = news_alerts.settings()
+        modes = {'actionable':'Buy/Sell changes and withdrawals; serious held-stock risk exceptions',
+                 'signals_only':'Buy/Sell changes and withdrawals only', 'all':'All fresh headlines and model/event alerts'}
+        return (f"News filter: {p['mode']}\n{modes[p['mode']]}\n"
+                f"Intraday confirmation: {p['confirmations']} distinct quote timestamps.\n"
+                f"Recent news window: {p['correlation_hours']} hours; timing does not prove causation.\n"
+                'All stored headlines remain available through /news SYMBOL. Change the filter in dashboard Settings → News alert filter.')
     if action == '/feedback':
         from .quality import feedback
         try:
@@ -123,7 +132,7 @@ def command(text):
                           for key,label in [('news','Google News'),('nse','NSE announcements'),('signals','Model status')]) +
                 '\nSource health: '+', '.join(x['source']+' '+x['state'] for x in state['sources'])+
                 f"\nPending deliveries: {state['delivery'].get('pending', 0)}.\n"
-                'Quotes and price-drop confirmations use daily data. No orders are placed.')
+                'Threshold checks use indicative quotes; price-drop event studies use daily closes. /alerts shows the news filter. No orders are placed.')
     if action == '/portfolio':
         holdings = portfolio.holdings()
         return '\n'.join(f"{s}: {p['quantity']} shares; average cost ₹{p['avg_cost']:.2f}" for s,p in holdings.items()) or 'No holdings recorded.'
@@ -134,6 +143,15 @@ def command(text):
         if action == '/news':
             heads = recommendations._recent_headlines(sym)
             return '\n\n'.join(f"{h['published_utc']} — {h['title']}\n{h['url']}" for h in heads) or 'No stored news for this symbol.'
+        with dbm.connect() as db:
+            latest = db.execute('SELECT snapshot FROM signal_evidence WHERE symbol=?', (sym,)).fetchone()
+        context = json.loads(latest['snapshot']) if latest else {}
+        if context.get('indicative') and context.get('model'):
+            meta, model = context['price_snapshot'], context['model']
+            return (f"{sym} — confirmed model {model['signal']}\n"
+                    f"Observed indicative price: ₹{meta.get('price')} as of {meta.get('price_time')}\n"+
+                    '\n'.join(f"{k.title()}: {v}" for k,v in model['scores'].items())+
+                    f"\n{model['why']}\nLast confirmed observation; possibly delayed or stale. Check /status for source health. No trade executed.")
         rec = fundamentals.load(sym)
         if not rec:
             return 'Financials not imported; review required.'

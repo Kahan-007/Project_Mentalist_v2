@@ -83,6 +83,8 @@ def connect(path=None):
     db.executescript(QUALITY_SCHEMA)
     from .research import SCHEMA as RESEARCH_SCHEMA
     db.executescript(RESEARCH_SCHEMA)
+    from .news_alerts import SCHEMA as NEWS_ALERT_SCHEMA
+    db.executescript(NEWS_ALERT_SCHEMA)
     try:
         with db:
             yield db

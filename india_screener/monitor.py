@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import appnotify, config, daily, db as dbm, news, outbox, storage, telegram, tracker, net, recommendations
+from . import appnotify, config, daily, db as dbm, news, outbox, storage, telegram, tracker, net, recommendations, news_alerts
 
 STOP = threading.Event()
 _threads = []
@@ -59,6 +59,7 @@ def ingest(item, heads, cfg):
                 if audited['disposition'] != 'future':
                     continue
                 db.execute('DELETE FROM headline_audit WHERE news_id=?', (nid,))
+                db.execute('UPDATE news SET published_utc=? WHERE id=?', (h['published_utc'], nid))
             try:
                 published = dt.datetime.fromisoformat(h['published_utc'])
                 if published.tzinfo is None:
@@ -70,15 +71,22 @@ def ingest(item, heads, cfg):
             event_key = 'headline:'+item['symbol']+':'+hashlib.sha256(key.encode()).hexdigest()
             existing = db.execute('SELECT id FROM alert_outbox WHERE event_key=?', (event_key,)).fetchone()
             triage = assess(h, record)
+            push, filter_reason = news_alerts.headline_push(item, triage, cfg)
             aid = existing['id'] if existing else None
             if existing:
                 disposition = 'previously queued'
             elif disposition == 'queued':
+                if not push:
+                    disposition = 'filtered'
+                    db.execute('INSERT INTO headline_audit VALUES(?,?,?,?,?,?,?)',
+                               (nid,None,now.timestamp(),epoch,disposition,triage['label'],filter_reason))
+                    continue
                 title = f"{item['symbol']}: {triage['label']}"
                 body = (f"{h['title']}\nSource: {h.get('source') or 'unknown'} ({triage['source_type']})\n"
                         f"Published: {h['published_utc']}\nDetected: {now.isoformat()}\n"
                         f"{'You hold this stock.' if item['held'] else 'On your shortlist.'}\n"
-                        f"{triage['reason']}\n{triage.get('context') or ''}\n{h['url']}\nNo trade executed.")
+                        f"{triage['reason']}\n{filter_reason}\n{triage.get('context') or ''}\n{h['url']}\n"
+                        'Risk review only; this headline does not create a Buy/Sell recommendation. No trade executed.')
                 aid = outbox.enqueue(title, body, event_key, cfg, db)
                 body += f'\nAlert #{aid}. Feedback: /feedback {aid} useful (or noise, incorrect, duplicate)'
                 db.execute('UPDATE alert_outbox SET body=? WHERE id=?', (body,aid))
@@ -119,22 +127,50 @@ def scan_nse_once():
 
 
 def scan_signals_once():
-    from . import fundamentals, scoring, research, server
+    from . import fundamentals, scoring, research, server, prices
     items = daily.watchlist()
-    st, ranks, analyses, archive_errors = scoring.settings(), server.size_ranks(), {}, {}
-    for it in items:
+    cfg = config.load_config()
+    st = {**scoring.DEFAULT_SETTINGS, **cfg.get('scoring', {})}
+    ranks, analyses, records, errors = server.size_ranks(), {}, {}, {}
+    # Bound requests just like the headline worker. Larger lists rotate, never hundreds of quotes/minute.
+    bucket = int(time.time()//60)
+    chunks = max(1, (len(items)+19)//20)
+    items = [it for i,it in enumerate(items) if i % chunks == bucket % chunks]
+
+    def observe(it):
         rec = fundamentals.load(it['symbol'])
+        if rec:
+            rec = news_alerts.quote_record(rec, prices.quote_now(it['symbol'], it.get('exchange', 'NSE')), cfg)
+        analysis = scoring.score_company(rec, st, ranks.get(it['symbol'])) if rec else None
+        return rec, analysis
+
+    with ThreadPoolExecutor(max_workers=min(4, max(1, cfg['workers']))) as pool:
+        tasks = {pool.submit(observe, it):it for it in items}
+        for future in as_completed(tasks):
+            it = tasks[future]
+            try:
+                rec, analysis = future.result()
+                records[it['symbol']] = rec
+                analyses[it['symbol']] = (analysis, None if rec else 'financials unavailable')
+            except Exception as exc:
+                # A failed/stale quote cannot manufacture a financial signal or overwrite its baseline.
+                errors[it['symbol']] = type(exc).__name__
+    observed = [it for it in items if it['symbol'] in analyses]
+    for it in observed:
         try:
-            analysis = scoring.score_company(rec, st, ranks.get(it['symbol'])) if rec else None
-            analyses[it['symbol']] = (analysis, None if rec else 'financials unavailable')
+            # Keep the daily research archive tied to saved fundamentals, rather than duplicating
+            # full statements for every changing intraday tick. Live decisions have their own ledger.
+            saved = fundamentals.load(it['symbol'])
+            saved_analysis = scoring.score_company(saved, st, ranks.get(it['symbol'])) if saved else None
+            research.capture(it, saved, saved_analysis, st)
         except Exception as exc:
-            analyses[it['symbol']] = (None, type(exc).__name__)
-        try:
-            research.capture(it, rec, analyses[it['symbol']][0], st)
-        except Exception as exc:
-            archive_errors[it['symbol']] = type(exc).__name__
-    recommendations.log_signal_changes(items, analyses)
-    _health('signals', {'checked_at': config.now_ist().isoformat(), 'tracked': len(items), 'errors':archive_errors})
+            errors['archive:'+it['symbol']] = type(exc).__name__
+    pushed = recommendations.log_signal_changes(observed, analyses, cfg=cfg, records=records, st=st,
+                                                size_ranks=ranks, indicative=True)
+    _health('signals', {'checked_at': config.now_ist().isoformat(), 'tracked': len(items),
+                        'observed':len(observed), 'new_alerts':pushed, 'errors':errors,
+                        'price_basis':'indicative quotes; daily event studies still use completed sessions'})
+    return pushed
 
 
 def _loop(name, fn, interval):
@@ -170,7 +206,9 @@ def start():
             return False
         _lockfile = f
         STOP.clear()
-        poll = max(60, float(config.load_config()['monitor']['poll_seconds']))
+        cfg = config.load_config()
+        news_alerts.apply_pending_filter(cfg)
+        poll = max(60, float(cfg['monitor']['poll_seconds']))
         # The official RSS declares ttl=5 minutes. Google latency is controlled by its publisher/indexer.
         jobs = [('news', scan_once, poll), ('nse', scan_nse_once, 300),
                 ('telegram', telegram.poll_once, 1), ('delivery', outbox.flush, 2), ('signals', scan_signals_once, 60)]

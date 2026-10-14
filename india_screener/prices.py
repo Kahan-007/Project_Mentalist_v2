@@ -112,10 +112,11 @@ def benchmark(cfg=None):
 def quote_now(symbol, exchange="NSE"):
     """Indicative (possibly delayed) last price. Not used for any calculation that needs closes."""
     ysym = yahoo_symbol(symbol, exchange)
-    raw = net.fetch(CHART.format(host=HOSTS[0], sym=quote(ysym, safe=""), rng="1d", interval="5m"))
+    raw = net.fetch(CHART.format(host=HOSTS[0], sym=quote(ysym, safe=""), rng="1d", interval="5m"), timeout=10, retries=0)
     meta = json.loads(raw)["chart"]["result"][0]["meta"]
     price, prev, ts = meta.get("regularMarketPrice"), meta.get("chartPreviousClose"), meta.get("regularMarketTime")
-    if meta.get("currency") != "INR" or not all(isinstance(x, (int, float)) and x > 0 for x in (price, prev, ts)):
+    if (meta.get("currency") != "INR" or meta.get('symbol') != ysym or
+            not all(not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x) and x > 0 for x in (price, prev, ts))):
         raise DataError(f"{ysym}: incomplete quote")
     return {"symbol": symbol, "price": float(price), "previous_close": float(prev),
             "time": dt.datetime.fromtimestamp(ts, config.IST).isoformat()}

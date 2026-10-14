@@ -8,6 +8,7 @@ def assess(head, record=None):
     source = 'exchange disclosure' if head.get('source') == 'NSE corporate announcement' else 'secondary report'
     urgent = re.search(r'\b(default(?:s|ed)?|insolvency|fraud|auditor.{0,25}resign\w*|credit.{0,15}downgrad\w*)\b', text)
     qualified = re.search(r'\b(no|not|denies|denied|denial|avoids|averted|alleged|allegation|rumou?r)\b', text)
+    qualified = qualified or re.search(r'\b(default settings|fraud (?:prevention|awareness|protection)|anti[- ]fraud)\b', text)
     routine = re.search(r'\b(trading window|compliance certificate|loss of share certificate|duplicate share certificate|board meeting intimation|newspaper publication)\b', text)
     cats = head.get('categories', [])
     if urgent:

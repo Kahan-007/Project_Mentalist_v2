@@ -31,6 +31,10 @@ class Triage(unittest.TestCase):
 class Audit(Isolated):
     ITEM = {'symbol':'TEST', 'held':True, 'shortlisted':False}
 
+    def setUp(self):
+        super().setUp()
+        self.cfg['news_alerts']['mode'] = 'all'  # delivery/latency tests require a direct headline push
+
     def head(self, age, title='Company results'):
         return {'title':title,'published_utc':(config.now_ist()-dt.timedelta(seconds=age)).isoformat(),
                 'url':'https://example.com/report','source':'test','categories':['results']}

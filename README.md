@@ -82,13 +82,13 @@ python3 -m india_screener service show      # macOS installed jobs
 python3 -m india_screener service remove    # uninstall login jobs; retain project and pairing
 ```
 
-The monitor checks Google headlines about every minute for up to 20 tracked stocks per round; larger lists rotate. NSE official announcements are polled every five minutes, respecting the feed's stated TTL. Holdings and shortlisted stocks are tracked; importing a company alone does not subscribe to its news. New headlines up to 60 minutes old are pushed once per normalized headline (NSE uses the document URL). Older items are stored without a catch-up phone flood. Source indexing/publication delays still apply.
+The monitor checks Google headlines about every minute for up to 20 tracked stocks per round; larger lists rotate. NSE official announcements are polled every five minutes, respecting the feed's stated TTL. Holdings and shortlisted stocks are tracked; importing a company alone does not subscribe to its news. The default news filter pushes Buy/Sell changes and withdrawals with price evidence and relevant recent news, plus serious risk review for recorded holdings. Routine news is stored. Settings → **News alert filter** also offers strict signals-only and the legacy All feed. Direct headline pushes require publication within 60 minutes; the separate 72-hour context window allows overnight/older news to accompany a later signal. Source indexing/publication delays still apply.
 
-Telegram commands: `/help`, `/status`, `/portfolio`, `/stock INFY`, `/news INFY`. Only the paired private user/chat may query data. Bot credentials and pairing state are stored under `.local/`, excluded by `.gitignore`, with owner-only file permissions on macOS. Never commit tokens or send them in a support message.
+Telegram commands: `/help`, `/status`, `/alerts`, `/portfolio`, `/stock INFY`, `/news INFY`. Only the paired private user/chat may query data. Bot credentials and pairing state are stored under `.local/`, excluded by `.gitignore`, with owner-only file permissions on macOS. Never commit tokens or send them in a support message.
 
 Alerts are transactionally queued alongside event state changes. Failed channel deliveries are retried after restart; an ambiguous network timeout can still duplicate a message. Status changes are recorded with settings and analysis snapshots, then pushed to configured channels. The first observation establishes a baseline without flooding old Buy/Sell labels. Initial linking sends a welcome confirmation.
 
-These are news notifications and model review prompts. Intraday reaction analysis, automatic orders and validated investment returns are not implemented. Daily event confirmation continues using completed trading sessions.
+Threshold checks now use validated indicative Yahoo quotes, with two distinct quote timestamps required for a price-driven intraday change. Stale/failed quotes cannot manufacture a signal; quotes reprice copies without rewriting saved daily prices or statements. Notifications, `/stock` and the recommendation ledger expose monitor observations separately from the dashboard's saved-price scores. Intraday abnormal-return studies, automatic orders and validated investment returns are not implemented. Daily event confirmation continues using completed trading sessions. See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for the precise policy and limitations.
 
 ## Long-term research improvements
 
@@ -101,7 +101,3 @@ Open **Monitor & risk** at http://127.0.0.1:8766/#quality for source health, hea
 - The monitor archives the statements, settings, algorithm version and analysis it actually observes. Future 20/60/120/252-session stock returns, benchmark-relative returns and maximum drawdown use cached adjusted daily data. They are descriptive observations, exclude trading costs and are not a profitability-validated strategy. Newly created archives need time before outcomes can exist.
 
 See [LONG_TERM_UPGRADE.md](LONG_TERM_UPGRADE.md) for scope, definitions, known limits and validation.
-
-## GitHub data snapshot
-
-This branch includes the app, imported fundamentals, cached market data, reports, portfolio transactions and research history as a dated snapshot. Telegram credentials, chat identities, runtime logs and machine-specific services are excluded. External delivery destinations in the uploaded database are redacted and pending external sends are cancelled. Link your own bot after cloning; never copy `.local/` into Git. Updates preserve the `telegram-group-alerts` branch history and leave the default branch unchanged.

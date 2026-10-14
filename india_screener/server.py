@@ -684,11 +684,12 @@ ALERT_KEYS = {("event", "min_abnormal_drop"): (0.01, 0.20, False), ("event", "si
 
 
 def api_settings(q, body):
+    from . import news_alerts
     cfg = config.load_config()
     return {"scoring": scoring.settings(), "telegram_configured": bool(cfg["notify"]["telegram_bot_token"]),
             "windows_toast": cfg["notify"]["windows_toast"],
             "ntfy_topic": cfg["notify"]["ntfy_topic"], "ntfy_server": cfg["notify"]["ntfy_server"],
-            "discord_configured": bool(cfg["notify"]["discord_webhook"]),
+            "discord_configured": bool(cfg["notify"]["discord_webhook"]), "news_alerts":news_alerts.settings(cfg),
             "alerts": {f"{s}.{k}": cfg[s][k] for s, k in ALERT_KEYS},
             "alert_defaults": {f"{s}.{k}": config.DEFAULTS[s][k] for s, k in ALERT_KEYS}}
 
@@ -698,6 +699,22 @@ def api_settings_save(q, body):
     if b.get("scoring"):
         presets.ensure_baseline()
     user = storage.read_json(config.CONFIG_PATH) or {}
+    if 'news_alerts' in b:
+        from .news_alerts import MODES
+        values = b['news_alerts']
+        if not isinstance(values, dict):
+            raise ValueError('News alert settings must be an object')
+        policy = user.setdefault('news_alerts', {})
+        if 'mode' in values:
+            if values['mode'] not in MODES:
+                raise ValueError('Choose actionable, signals_only or all')
+            policy['mode'] = values['mode']
+        for key, lo, hi in [('correlation_hours',1,168), ('quote_max_age_minutes',1,60), ('confirmations',1,5)]:
+            if key in values:
+                v = float(values[key])
+                if not math.isfinite(v) or not lo <= v <= hi or not v.is_integer():
+                    raise ValueError(f'{key} must be a whole number between {lo} and {hi}')
+                policy[key] = int(v)
     sc = user.setdefault("scoring", {})
     for k, v in b.get("scoring", {}).items():
         if k in SETTING_KEYS:
@@ -747,6 +764,9 @@ def api_settings_save(q, body):
     if b.get("discord_remove"):
         n["discord_webhook"] = ""
     storage.write_json(config.CONFIG_PATH, user)
+    if 'news_alerts' in b:
+        from .news_alerts import apply_pending_filter
+        apply_pending_filter(config.load_config())
     if b.get("scoring"):
         presets.record("saved")
     return api_settings(q, body)

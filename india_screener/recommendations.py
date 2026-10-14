@@ -10,6 +10,7 @@ The rows live in data/screener.sqlite (table recommendation_log); `py -m india_s
 and `py -m india_screener ledger --csv FILE` exports them for Excel.
 """
 import csv
+import datetime as dt
 import io
 import json
 import math
@@ -132,42 +133,75 @@ def safe_record(*args, **kw):
         return None
 
 
-def log_signal_changes(items, analyses, publish=True):
+def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st=None, size_ranks=None, indicative=False):
     """Freeze transitions and queue delivery in the same transaction; initial state establishes a baseline."""
-    from . import outbox, scoring
+    from . import outbox, scoring, news_alerts
     if not publish:
         return
-    cfg, st = config.load_config(), scoring.settings()
+    cfg = cfg or config.load_config()
+    st = st or {**scoring.DEFAULT_SETTINGS, **cfg.get('scoring', {})}
+    pushed = 0
     for it in items:
         sym = it['symbol']
         analysis, err = analyses.get(sym, (None, None))
-        signal_now, why = assess(it['held'], it['shortlisted'], analysis, st)
-        meta = (fundamentals.load(sym) or {}).get('meta', {})
+        signal_now, why = assess(it['held'], it['shortlisted'], None if err else analysis, st)
+        rec = records.get(sym) if records is not None else fundamentals.load(sym)
+        rank = (size_ranks or {}).get(sym)
+        if rank is None and (analysis or {}).get('size_basis') == 'rank':
+            rank = {'large':1, 'mid':101, 'small':251}.get(analysis.get('size'))
+        context = news_alerts.evidence(it, rec, st, indicative, rank, (analysis or {}).get('algorithm_version'))
+        context['model'] = {'signal':signal_now, 'why':why,
+                            'scores':{k:(analysis or {}).get(k, {}).get('score') for k in ('buffett', 'munger', 'lynch')}}
+        meta = context['price_snapshot']
         stamp = config.now_ist().isoformat()
         with dbm.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             old = db.execute('SELECT signal FROM signal_state WHERE symbol=?', (sym,)).fetchone()
+            ready, previous = news_alerts.confirmed(db, sym, old['signal'] if old else None, signal_now, context, cfg)
+            if not ready:
+                continue
             if old and old['signal'] == signal_now:
                 continue
             prior = old['signal'] if old else 'initial baseline'
             note = f'{prior} → {signal_now}: {why}'
             sc = lambda k: (analysis or {}).get(k, {}).get('score')
-            snapshot = {**(analysis or {}), 'settings_snapshot': st, 'analysis_error': err}
+            heads = news_alerts.related_headlines(db, sym, context, cfg) if old else []
+            detail = news_alerts.transition_detail(it, rec, analysis, st, previous, context, prior, signal_now,
+                                                  rank) if old else {}
+            snapshot = {**(analysis or {}), 'settings_snapshot': st, 'analysis_error': err,
+                        'alert_evidence':context, 'transition':detail, 'alert_policy':news_alerts.settings(cfg)}
             cur = db.execute(
                 'INSERT INTO recommendation_log(logged_at,symbol,reason,held,shortlisted,price,price_date,price_source,'
                 'buffett,munger,lynch,matches,note,headlines,analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (stamp, sym, 'signal_'+str(signal_now), int(it['held']), int(it['shortlisted']),
                  meta.get('price'), meta.get('price_date'), meta.get('price_source'),
                  sc('buffett'), sc('munger'), sc('lynch'), json.dumps((analysis or {}).get('matches', [])),
-                 note, '[]', json.dumps(_clean(snapshot))))
+                 note, json.dumps(_clean(heads)), json.dumps(_clean(snapshot))))
             if old:
-                title = f'{sym}: model status changed to {signal_now}'
-                body = f"{note}\nPrice as of {meta.get('price_date') or 'unknown'}.\nModel review prompt; no trade executed."
-                outbox.enqueue(title, body, f'signal:{cur.lastrowid}', cfg, db)
+                title, body = news_alerts.recommendation_text(it, analysis, why, prior, signal_now, context,
+                                                            previous, heads, detail, cfg)
+                push = news_alerts.signal_push(prior, signal_now, cfg)
+                aid = outbox.enqueue(title, body, f'signal:{cur.lastrowid}', cfg, db, push=push)
+                if push:
+                    pushed += 1
+                for h in heads:
+                    db.execute('INSERT INTO signal_news VALUES(?,?)', (cur.lastrowid, h['id']))
+                    detected = dt.datetime.fromisoformat(h['first_seen']).replace(tzinfo=dt.timezone.utc).timestamp()
+                    db.execute('INSERT OR IGNORE INTO headline_audit VALUES(?,?,?,?,?,?,?)',
+                               (h['id'],None,detected,dt.datetime.fromisoformat(h['published_utc']).timestamp(),
+                                'stored',h['priority'],'Stored by the daily news check.'))
+                    # Preserve an earlier direct risk alert, otherwise associate feedback with this decision.
+                    db.execute("UPDATE headline_audit SET alert_id=?,disposition='linked to signal',"
+                               "explanation=explanation || ' Attached to a model change; causation unproven.' "
+                               'WHERE news_id=? AND alert_id IS NULL', (aid, h['id']))
+                if heads:
+                    body += f'\nAlert #{aid}. Feedback: /feedback {aid} useful (or noise, incorrect, duplicate)'
+                    db.execute('UPDATE alert_outbox SET body=? WHERE id=?', (body, aid))
                 db.execute('INSERT INTO app_notifications(created_at,kind,title,body,symbol) VALUES(?,?,?,?,?)',
                            (stamp, 'stock', title, body, sym))
             db.execute('INSERT INTO signal_state VALUES(?,?,?) ON CONFLICT(symbol) DO UPDATE SET signal=excluded.signal,updated_at=excluded.updated_at',
                        (sym, signal_now, stamp))
+    return pushed
 
 
 def history(symbol=None, limit=500, full=False, path=None):

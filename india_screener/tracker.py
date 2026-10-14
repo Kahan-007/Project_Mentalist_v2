@@ -97,7 +97,7 @@ def evaluate(symbol, stock_bars, bench_bars, cfg, path=None, publish=True):
 
 
 def queue_event(alert, cfg, db):
-    from . import outbox
+    from . import outbox, news_alerts
     title = f"{alert['symbol']}: " + ('news-linked abnormal drop' if alert['type'] == 'dip' else 'price has levelled out')
     rows = db.execute('SELECT title,url FROM news WHERE symbol=? AND event_session=?', (alert['symbol'], alert['session'])).fetchall()
     dip, level = alert['detail'].get('dip', {}), alert['detail'].get('levelling', {})
@@ -113,7 +113,8 @@ def queue_event(alert, cfg, db):
     body = (f"Event session: {alert['session']}\n" + detail + '\n' +
             '\n'.join(f"{r['title']}\n{r['url']}" for r in rows[:4]) +
             '\nSame-session association does not prove causation. Review manually; no order placed.')
-    outbox.enqueue(title, body, f"event:{alert['symbol']}:{alert['session']}:{alert['type']}", cfg, db)
+    outbox.enqueue(title, body, f"event:{alert['symbol']}:{alert['session']}:{alert['type']}", cfg, db,
+                   push=news_alerts.settings(cfg)['mode'] == 'all')
 
 
 def list_events(statuses=None, path=None):

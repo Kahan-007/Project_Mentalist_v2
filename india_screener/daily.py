@@ -104,7 +104,11 @@ def run(cfg=None, send_alerts=True):
     if send_problems:
         errors["pop-up / Telegram delivery"] = "; ".join(sorted(send_problems))
     analyses = {it["symbol"]: recommendations.analyse(it["symbol"]) for it in items}
-    recommendations.log_signal_changes(items, analyses, publish=send_alerts)
+    recommendations.log_signal_changes(items, analyses, publish=send_alerts, cfg=cfg)
+    if send_alerts:
+        send_problems.update(outbox.flush(cfg))
+        if send_problems:
+            errors['pop-up / Telegram delivery'] = '; '.join(sorted(send_problems))
     path = write_report(today, bench, items, bars_by_symbol, formatted, errors, analyses)
     for name, msg in errors.items():
         appnotify.program(*explain_error(name, msg), key=f"daily:{name}")
