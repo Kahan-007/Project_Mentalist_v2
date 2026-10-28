@@ -20,6 +20,8 @@ class NewsAlerts(Isolated):
         self.cfg['notify'].update(telegram_bot_token='123:'+'x'*30, telegram_chat_id='7')
         p = mock.patch.object(config, 'now_ist', return_value=NOW)
         p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(quality.time, 'time', return_value=NOW.timestamp())
+        p.start(); self.addCleanup(p.stop)
         self.st = {**scoring.DEFAULT_SETTINGS, **self.cfg.get('scoring', {})}
         self.rec = fundamentals.parse_grid(fx.to_grid(fx.quality_company(
             years=[f'{y}-03-31' for y in range(2017, 2027)])))

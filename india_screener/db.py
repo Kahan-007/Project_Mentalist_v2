@@ -1,9 +1,13 @@
 """SQLite schema for the ledger, news and event tracker."""
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 from . import config
+
+SCHEMA_VERSION = 1
+_INIT_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS transactions(
@@ -64,6 +68,11 @@ CREATE TABLE IF NOT EXISTS recommendation_log(   -- append-only: rows are never 
 CREATE INDEX IF NOT EXISTS reclog_symbol ON recommendation_log(symbol, logged_at);
 CREATE INDEX IF NOT EXISTS news_unresolved ON news(symbol, event_session);
 CREATE INDEX IF NOT EXISTS events_open ON events(status);
+CREATE TABLE IF NOT EXISTS ledger_audit(
+    id INTEGER PRIMARY KEY, action TEXT NOT NULL, transaction_id INTEGER NOT NULL,
+    before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -74,18 +83,22 @@ def connect(path=None):
     db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
-    db.executescript(SCHEMA)
     from .outbox import SCHEMA as OUTBOX_SCHEMA
-    db.executescript(OUTBOX_SCHEMA)
     from .appnotify import SCHEMA as NOTIFICATION_SCHEMA
-    db.executescript(NOTIFICATION_SCHEMA)
     from .quality import SCHEMA as QUALITY_SCHEMA
-    db.executescript(QUALITY_SCHEMA)
     from .research import SCHEMA as RESEARCH_SCHEMA
-    db.executescript(RESEARCH_SCHEMA)
     from .news_alerts import SCHEMA as NEWS_ALERT_SCHEMA
-    db.executescript(NEWS_ALERT_SCHEMA)
     try:
+        # Version is in the database, not a path cache: replacing a file is safe.
+        with _INIT_LOCK:
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError('Database belongs to a newer Mentalist version')
+            if version < SCHEMA_VERSION:
+                db.execute('PRAGMA journal_mode=WAL')
+                db.executescript('BEGIN IMMEDIATE;\n' + SCHEMA + OUTBOX_SCHEMA + NOTIFICATION_SCHEMA +
+                                 QUALITY_SCHEMA + RESEARCH_SCHEMA + NEWS_ALERT_SCHEMA +
+                                 f'\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;')
         with db:
             yield db
     finally:
