@@ -52,6 +52,7 @@ def report(days=7):
         pending = db.execute("SELECT count(*),min(a.created_at) FROM alert_delivery d JOIN alert_outbox a ON a.id=d.alert_id WHERE d.status='pending' AND d.channel='telegram'").fetchone()
         ratings = {r['rating']:r['n'] for r in db.execute('SELECT f.rating,count(*) AS n FROM alert_feedback f '
                    'JOIN alert_outbox a ON a.id=f.alert_id WHERE a.created_at>=? GROUP BY f.rating', (cutoff,))}
+        attention = [dict(r) for r in db.execute("SELECT channel,attempts,last_error,next_attempt FROM alert_delivery WHERE status='pending' AND attempts>=5 ORDER BY attempts DESC LIMIT 20")]
     counts, delivered = {}, {}
     for r in rows:
         counts[r['disposition']] = counts.get(r['disposition'], 0)+1
@@ -59,7 +60,7 @@ def report(days=7):
         r['queue_to_delivery_seconds'] = r['sent_at']-r['created_at'] if r['sent_at'] else None
         if r['alert_id'] is not None:
             delivered[r['alert_id']] = r['queue_to_delivery_seconds']
-    return {'days':days, 'counts':counts, 'feedback':ratings,
+    return {'delivery_attention':attention, 'days':days, 'counts':counts, 'feedback':ratings,
             'publication_to_detection':distribution([r['publication_to_detection_seconds'] for r in rows]),
             'queue_to_delivery':distribution(delivered.values()),
             'pending_telegram':pending[0], 'oldest_pending_seconds':time.time()-pending[1] if pending[1] else None,

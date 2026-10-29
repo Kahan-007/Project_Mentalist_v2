@@ -3,6 +3,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const main = $("#main");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const inr = (x, d = 2) => x == null ? "–" : "₹" + Number(x).toLocaleString("en-IN", {minimumFractionDigits: d, maximumFractionDigits: d});
+const fmt = (x, d = 2) => x == null ? "–" : Number(x).toFixed(d);
 const cr = x => x == null ? "–" : "₹" + Math.round(x).toLocaleString("en-IN") + " cr";
 const pct = (x, d = 1) => x == null ? "–" : (x * 100).toFixed(d) + "%";
 const signed = (x, f = inr) => x == null ? "–" : `<span class="${x >= 0 ? "gain" : "loss"}">${x >= 0 ? "+" : "−"}${f(Math.abs(x))}</span>`;
@@ -24,6 +25,11 @@ async function monitorView() {
       <table><thead><tr><th class="l">Source</th><th>State</th><th>Last completed check</th></tr></thead><tbody>
       ${d.monitor.sources.map(s => `<tr><td class="l">${esc(s.source)}</td><td>${esc(s.state)}</td><td>${esc(s.checked_at || 'Not checked')}</td></tr>`).join('')}</tbody></table>
       <p class="muted">The Mac must be awake and online. A running process does not by itself establish that every source is healthy.</p></section>
+    <section class="box"><h3>Refresh and delivery health</h3>
+      <table><thead><tr><th class="l">Job</th><th>Status</th><th>Last success</th><th>Next retry</th></tr></thead><tbody>
+      ${Object.entries(d.refresh.jobs || {}).map(([name,j])=>`<tr><td class="l">${esc(name)}</td><td>${esc(j.status)}</td><td>${esc(j.last_success || 'not recorded')}</td><td>${esc(j.next_retry || 'regular schedule')}</td></tr>`).join('') || '<tr><td colspan="4">No refresh attempts recorded by this version yet.</td></tr>'}</tbody></table>
+      <p>Last NSE price file: ${esc(d.current_prices.nse_date || 'not recorded')}. Yahoo failures: ${Object.keys(d.current_prices.yahoo_failed || {}).length}.</p>
+      ${q.delivery_attention?.length ? `<p class="warn">Repeated delivery failures: ${q.delivery_attention.map(v=>`${esc(v.channel)}: ${v.attempts} attempts (${esc(v.last_error)})`).join('; ')}. Queued retries continue.</p>` : ''}</section>
     <section class="box"><h3>Alert quality · last ${q.days} days</h3>
       <p>Detected headline records: ${Object.values(q.counts).reduce((a,b)=>a+b,0)}. Headline pushes: ${q.counts.queued || 0}; filtered: ${q.counts.filtered || 0}; linked to a signal change: ${q.counts['linked to signal'] || 0}; too old for a headline push: ${q.counts.stale || 0}.</p>
       <table><thead><tr><th class="l">Measured delay</th><th>Samples</th><th>Median</th><th>95th percentile</th></tr></thead><tbody>
@@ -42,6 +48,8 @@ async function monitorView() {
       ${r.holdings.map(p=>`<tr><td class="l">${esc(p.symbol)}</td><td>${esc(p.price_date)}</td><td>${inr(p.value)}</td><td>${pct(p.weight)}</td><td class="l">${esc(p.industry)}</td><td>${p.over_limit?'Above your limit':'—'}</td></tr>`).join('')}</tbody></table></div>
       <p>${r.industries.map(s=>`${esc(s.industry)}: ${pct(s.weight)}${s.over_limit?' (above your limit)':''}`).join(' · ')}</p>
       <p class="muted">${esc(r.note)}</p>
+      <p>Price coverage: ${r.price_coverage.fresh_positions} fresh / ${r.price_coverage.total_positions} positions.</p>
+      ${r.history.status === 'observed' ? `<p>Unchanged holdings from ${esc(r.history.from)} to ${esc(r.history.to)}: equity return ${pct(r.history.equity_return)}, benchmark ${pct(r.history.benchmark_return)}, excess ${pct(r.history.excess_return)}, maximum drawdown ${pct(r.history.max_drawdown)}, annualized volatility ${pct(r.history.annualized_volatility)}.</p><p class="muted">${esc(r.history.note)}</p>` : `<p>Historical risk unavailable: ${esc(r.history.reason)}.</p>`}
       <form id="risklimits" class="row"><label>Single-stock limit (%)<input name="max_stock_weight" type="number" min="0" max="100" step="1" value="${100*(r.limits.max_stock_weight||0)}"></label>
       <label>Industry limit (%)<input name="max_sector_weight" type="number" min="0" max="100" step="1" value="${100*(r.limits.max_sector_weight||0)}"></label>
       <button class="btn">Save warning limits</button><span class="muted">0 disables a limit. Warnings only; no holdings or orders are changed.</span></form></section>
@@ -57,7 +65,13 @@ async function monitorView() {
       <label>Surplus cash (₹ cr; FCFF only)<input name="cash_cr" type="number" min="0" step="any" value="0" required></label>
       <button class="btn">Calculate research value</button></form><div id="valuationresult" role="status"></div></section>
     <section class="box"><h3>Forward research archive</h3><p>${research.total} dated observations saved. Benchmark: ${esc(research.benchmark)}. Price-history cache updated: ${esc(research.benchmark_fetched_at || 'not available')}.</p>
-      <p>${esc(research.note)}</p><div class="scroll"><table><thead><tr><th class="l">Observed at</th><th>Stock</th><th>Model label</th><th>20-session return</th><th>60-session return</th><th>120-session return</th><th>252-session return</th></tr></thead><tbody>
+      <p>${esc(research.note)}</p>
+      <p class="warn">Insufficient evidence for a validated investment-performance claim. Illustrative one-way costs: ${research.one_way_cost_bps} bps.</p>
+      <table><thead><tr><th>Sessions</th><th>Completed / saved</th><th>Nonoverlapping observations</th><th>Median net excess return</th><th>Outperforming observations</th></tr></thead><tbody>
+      ${Object.entries(research.summary).map(([h,v])=>`<tr><td>${h}</td><td>${v.completed} / ${v.observations}</td><td>${v.nonoverlapping_per_stock.samples}</td><td>${pct(v.nonoverlapping_per_stock.median_net_excess_return)}</td><td>${pct(v.nonoverlapping_per_stock.outperforming_observation_fraction)}</td></tr>`).join('')}</tbody></table>
+      <details><summary>60-session breakdown by philosophy, signal, model and observation type</summary>
+      ${Object.entries(research.groups).map(([dimension,groups])=>`<h4>${esc(dimension)}</h4><table><thead><tr><th class="l">Group</th><th>Completed / saved</th><th>Nonoverlapping samples</th><th>Median net excess</th></tr></thead><tbody>${Object.entries(groups).map(([name,h])=>`<tr><td class="l">${esc(name)}</td><td>${h['60'].completed} / ${h['60'].observations}</td><td>${h['60'].nonoverlapping_per_stock.samples}</td><td>${pct(h['60'].nonoverlapping_per_stock.median_net_excess_return)}</td></tr>`).join('')}</tbody></table>`).join('')}</details>
+      <div class="scroll"><table><thead><tr><th class="l">Observed at</th><th>Stock</th><th>Model label</th><th>20-session return</th><th>60-session return</th><th>120-session return</th><th>252-session return</th></tr></thead><tbody>
       ${research.recent.slice(0,20).map(o=>`<tr><td class="l">${esc(o.observed_at)}</td><td>${esc(o.symbol)}</td><td>${esc(o.signal)}</td>${outcomes(o)}</tr>`).join('')}</tbody></table></div>
       <p class="muted">The archive starts now; outcomes appear only after enough subsequent trading sessions. These are descriptive returns, not executable paper trades. Refreshing this page uses cached prices; the daily job refreshes market data.</p></section>`;
   $('#valuationworksheet').onsubmit = e => {e.preventDefault(); guard(async () => {
@@ -151,14 +165,14 @@ async function portfolio() {
   <h2>My portfolio</h2>
   <p class="lead">Add each purchase once. Values use the last completed daily close, so they settle after 4 pm.</p>
   <section class="box"><h3 style="margin-top:0">Add a transaction</h3>
-    <form class="row" id="txn">
+    <form class="row" id="txn"><input name="id" type="hidden">
       <label>Stock<input name="symbol" list="stocklist" placeholder="Type a name or symbol" required size="18" autocomplete="off"></label>
       <label>Type<select name="kind"><option>BUY</option><option>SELL</option><option>DIVIDEND</option><option>SPLIT</option><option>BONUS</option></select></label>
       <label>Date<input name="date" type="date" value="${today()}" required></label>
       <label class="f-trade">Quantity<input name="quantity" type="number" min="1" step="1"></label>
       <label class="f-trade">Price per share (₹)<input name="price" type="number" min="0" step="0.01"></label>
       <label class="f-trade">Charges (₹)<input name="fees" type="number" min="0" step="0.01" value="0"></label>
-      <label class="f-div" hidden>Total dividend received (₹)<input name="amount" type="number" min="0" step="0.01"></label>
+      <label class="f-div" hidden>Dividend / actual fractional settlement (₹)<input name="amount" type="number" min="0" step="0.01"></label>
       <label class="f-ratio" hidden>Ratio (new:old or bonus:held)<input name="ratio" placeholder="5:1" size="7"></label>
       <label>Exchange<select name="exchange"><option>NSE</option><option>BSE</option></select></label>
       <button class="btn">Save transaction</button>
@@ -181,21 +195,35 @@ async function portfolio() {
     <table><thead><tr><th class="l">Date</th><th class="l">Stock</th><th class="l">Type</th><th>Qty</th><th>Price</th><th>Charges</th><th>Detail</th><th></th></tr></thead>
     <tbody>${d.transactions.map(t => `<tr><td class="l">${t.trade_date}</td><td class="l">${esc(t.symbol)}</td><td class="l">${t.kind}</td>
     <td>${t.quantity || ""}</td><td>${t.price ? inr(t.price) : ""}</td><td>${t.fees ? inr(t.fees) : ""}</td>
-    <td>${t.kind === "DIVIDEND" ? inr(t.amount) : t.ratio_num ? t.ratio_num + ":" + t.ratio_den : esc(t.note)}</td>
-    <td><button class="link" data-del="${t.id}">Delete</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">None yet.</p>'}
+    <td>${t.kind === "DIVIDEND" ? inr(t.amount) : t.ratio_num ? t.ratio_num + ":" + t.ratio_den + (t.amount ? " · cash " + inr(t.amount) : "") : esc(t.note)}</td>
+    <td><button class="link" data-edit="${t.id}">Correct</button> <button class="link" data-del="${t.id}">Delete</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">None yet.</p>'}
   </section>`;
   const f = $("#txn");
   const toggle = () => { const k = f.kind.value;
     f.querySelectorAll(".f-trade").forEach(x => x.hidden = !["BUY", "SELL"].includes(k));
-    $(".f-div", f).hidden = k !== "DIVIDEND"; $(".f-ratio", f).hidden = !["SPLIT", "BONUS"].includes(k); };
+    $(".f-div", f).hidden = !["DIVIDEND", "SPLIT", "BONUS"].includes(k); $(".f-ratio", f).hidden = !["SPLIT", "BONUS"].includes(k); };
   f.kind.onchange = toggle;
   f.onsubmit = e => { e.preventDefault(); guard(async () => {
     const b = Object.fromEntries(new FormData(f)); b.symbol = symOf(b.symbol);
+    if (!["BUY","SELL"].includes(b.kind)) { delete b.quantity; delete b.price; delete b.fees; }
+    if (["BUY","SELL"].includes(b.kind)) { delete b.amount; delete b.ratio; }
     for (const k of ["quantity", "price", "fees", "amount", "ratio"]) if (b[k] === "") delete b[k];
-    await api("/api/txn", b); status(`Saved ${b.kind} ${b.symbol}`); portfolio(); }); };
+    if (b.id) {
+      const id = Number(b.id); delete b.id; b.trade_date = b.date; delete b.date;
+      await api('/api/txn/correct', {id, changes:b});
+    } else { delete b.id; await api("/api/txn", b); }
+    status(`Saved ${b.kind} ${b.symbol}`); portfolio(); }); };
   $("#tb").onchange = e => guard(async () => { const file = e.target.files[0]; if (!file) return;
     const r = await api("/api/import/zerodha", await file.text(), true);
     status(`Imported ${r.added} trades, skipped ${r.skipped} (duplicates or non-equity)`); portfolio(); });
+  main.querySelectorAll('[data-edit]').forEach(button => button.onclick = () => {
+    const transaction = d.transactions.find(t=>t.id===Number(button.dataset.edit));
+    for (const name of ['id','symbol','kind','quantity','price','fees','amount','exchange']) f.elements[name].value = transaction[name];
+    f.elements.date.value = transaction.trade_date;
+    f.elements.ratio.value = transaction.ratio_num ? `${transaction.ratio_num}:${transaction.ratio_den}` : '';
+    toggle(); f.scrollIntoView({behavior:'smooth'});
+    status('Correct the transaction above. The entire ledger will be validated before saving.');
+  });
   main.querySelectorAll("[data-del]").forEach(b => b.onclick = () => confirm("Delete this transaction?") &&
     guard(async () => { await api("/api/txn/delete", {id: +b.dataset.del}); portfolio(); }));
   bindAnalyseLinks();
@@ -235,6 +263,58 @@ function checksList(checks) {
   return `<ul class="checks">${checks.map(c => `<li><span class="st-${c.status}">${{ok: "✓", warn: "!", fail: "✗", skip: "–"}[c.status]}</span>
     ${esc(c.check)}: <span class="muted">${esc(c.detail)}</span></li>`).join("")}</ul>`;
 }
+function researchAnalysis(d) {
+  const comparison = d.model_comparison, result = d.valuation_research;
+  if (!comparison || !result) return '';
+  const input = d.valuation_inputs || {};
+  const number = (name,label,percent=false) => `<label>${label}<input name="${name}" type="number" step="any" required value="${input[name] == null ? '' : esc(Number(input[name])*(percent?100:1))}"></label>`;
+  return `<section class="box"><h3>Evidence and model comparison</h3>
+    <p><b>Production: ${esc(comparison.production_signal || 'not tracked')}</b> · ${esc(d.score.model_status)} (${esc(d.score.algorithm_version)}). ${esc(comparison.production_reason)}</p>
+    ${(d.score.data_quality.issues || []).length ? `<p class="warn">${d.score.data_quality.issues.map(esc).join('<br>')}</p>` : ''}
+    <p><b>Experimental: ${esc(comparison.experimental_assessment)}</b>. Business-quality matches: ${comparison.business_quality_matches.map(esc).join(', ') || 'none'}.
+    Valuation assessment: ${comparison.valuation_attractive == null ? 'unavailable' : comparison.valuation_attractive ? 'meets stated entry discount' : 'below stated entry discount'}.</p>
+    <p class="muted">${esc(comparison.note)}</p>
+    <table><thead><tr><th class="l">Philosophy</th><th>Production score</th><th>Experimental score</th><th class="l">Unknown red flags</th></tr></thead><tbody>
+    ${['buffett','munger','lynch'].map(k=>`<tr><td class="l">${esc(k)}</td><td>${d.score[k].score ?? '—'}</td><td>${d.experimental_score[k].score ?? '—'}</td><td class="l">${d.score[k].unknown_red_flags.map(esc).join(', ') || 'none'}</td></tr>`).join('')}</tbody></table>
+    <details><summary>Metric definitions and input limitations</summary><p>${esc(d.score.metric_notes)}</p>
+    <p>${esc(d.score.share_evidence.note)}</p><p>TTM earnings: ${d.score.ttm ? esc(d.score.ttm.to) : esc(d.score.ttm_unavailable_reason || 'annual earnings used')}.</p>
+    <p>Capex by period: ${d.score.capex_sources.map(([date,source])=>`${esc(date)}: ${esc(source)}`).join('; ')}. Balance-sheet estimates may include acquisitions, disposals and classification changes.</p></details>
+    ${(d.score.cycle_assessment.industry_flag || d.score.lynch_category === 'cyclical') ? `<h3>Cyclical earnings check</h3>
+    <p>Production category: <b>${esc(d.score.lynch_category)}</b>; experimental category: <b>${esc(d.experimental_score.lynch_category)}</b>.</p>
+    ${d.score.cycle_assessment.legacy_omits_cycle_test ? '<p class="warn">The legacy category skips the cyclical valuation test despite the industry flag. The experimental comparison applies it consistently regardless of history length.</p>' : ''}
+    <p>Mid-cycle EPS proxy: ₹${fmt(d.score.cycle_assessment.median_eps,2)}; normalized P/E: ${fmt(d.score.cycle_assessment.normalised_pe,1)}x, using ${d.score.cycle_assessment.observations} annual observations (${d.score.cycle_assessment.periods.map(esc).join(', ')}).</p>
+    <p class="muted">${esc(d.score.cycle_assessment.note)}</p>` : ''}
+    <h3>Reviewed cash-flow scenarios</h3><p>${esc(result.status)}</p>
+    ${result.scenarios.length ? `<p>Evidence date: ${esc(result.as_of)} · ${esc(result.source_note)}</p><div class="scroll"><table><thead><tr><th class="l">Case</th><th>Growth</th><th>Discount</th><th>Terminal growth</th><th>Equity value</th><th>Value/share</th><th>Margin of safety</th><th>Terminal dependence</th></tr></thead><tbody>
+      ${result.scenarios.map(v=>`<tr><td class="l">${esc(v.scenario)}</td><td>${pct(v.assumptions.growth)}</td><td>${pct(v.assumptions.discount_rate)}</td><td>${pct(v.assumptions.terminal_growth)}</td><td>${cr(v.equity_value_cr)}</td><td>${inr(v.value_per_share)}</td><td>${pct(v.margin_of_safety)}</td><td>${pct(v.terminal_share)}</td></tr>`).join('')}</tbody></table></div><p>${esc(result.note)}</p>` : ''}
+    <p>Information to review: ${(result.needed || []).map(esc).join('; ')}.</p>
+    <details><summary>Enter or update reviewed assumptions</summary>
+    <p>Enter a normalized cash flow and its matching discount rate. These assumptions are saved for this company. Conservative/optimistic sensitivity shifts growth and discount rates by 2 percentage points in opposite directions; no probabilities are assigned.</p>
+    <form class="row" data-research-symbol="${esc(d.symbol)}">
+      <label>Cash-flow definition<select name="kind"><option ${input.kind==='FCFF'?'selected':''}>FCFF</option><option ${input.kind==='FCFE'?'selected':''}>FCFE</option></select></label>
+      ${number('cash_flow_cr','Normalized annual cash flow (₹ cr)')}${number('discount_rate','WACC / cost of equity (%)',true)}
+      ${number('growth','Forecast growth (%)',true)}${number('terminal_growth','Terminal growth (%)',true)}
+      ${number('shares_cr','Current diluted shares (cr)')}${number('debt_cr','Debt (₹ cr; ignored for FCFE)')}${number('cash_cr','Surplus cash (₹ cr; ignored for FCFE)')}
+      <label>Evidence date<input name="as_of" type="date" required value="${esc(input.as_of || '')}"></label>
+      <label>Source and normalization notes<input name="source_note" required maxlength="2000" value="${esc(input.source_note || '')}"></label>
+      <label><input name="reviewed" type="checkbox" required> I reviewed the cash-flow definition, shares and assumptions</label>
+      <button class="btn">Save research scenarios</button></form></details></section>`;
+}
+
+document.addEventListener('submit', e => {
+  const form = e.target;
+  if (!form.dataset.researchSymbol) return;
+  e.preventDefault();
+  guard(async () => {
+    const input = Object.fromEntries(new FormData(form));
+    for (const k of ['discount_rate','growth','terminal_growth']) input[k] = Number(input[k])/100;
+    input.reviewed = form.elements.reviewed.checked;
+    await api('/api/valuation-research?symbol='+encodeURIComponent(form.dataset.researchSymbol),input);
+    status('Research assumptions saved; production policy unchanged');
+    await analyse(form.dataset.researchSymbol);
+  });
+});
+
 async function analyse(sym) {
   main.innerHTML = `<h2>Analyse a stock</h2>
     <p class="lead">Pick any NSE stock. For the Buffett, Munger and Lynch scores, import its financials from Screener.in (free account):
@@ -258,6 +338,7 @@ async function analyse(sym) {
     ${d.position ? `<div>You hold ${d.position.quantity} at ${inr(d.position.avg_cost)} average</div>` : ""}</div>
     <div class="row">${d.shortlisted ? '<button class="btn ghost" id="unsl">Remove from shortlist</button>' : '<button class="btn" id="sl">Add to shortlist</button>'}
     <a href="${esc(d.screener_url)}" target="_blank" rel="noopener">Open on Screener.in</a></div></div>
+    ${d.price_health?.state === 'stale fallback' ? `<p class="warn">Provider refresh failed; cached history through ${esc(d.price_health.last_session)} is shown.</p>` : ''}
     ${d.price ? spark(d.price.series) : ""}</section>
   ${sc ? `<section>${sc.warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("")}
     <p><span class="chip">${esc(sc.lynch_category)}</span><span class="chip src"${tip(src.market_cap)}>${esc(sc.size || "size n/a")} cap · ${cr(sc.market_cap_cr)}</span>
@@ -274,6 +355,7 @@ async function analyse(sym) {
       <p class="warn">${esc(sc.sensitivity.limitation)}</p><p>${esc(sc.sensitivity.note)}</p>
       <div class="scroll"><table><thead><tr><th class="l">Assumption</th><th>Discount rate</th><th>Estimated value/share</th><th>Margin of safety</th></tr></thead><tbody>
       ${sc.sensitivity.scenarios.map(v => `<tr><td class="l" title="${esc(v.assumptions)}">${esc(v.scenario)}</td><td>${pct(v.discount_rate)}</td><td>${v.value_per_share > 0 ? inr(v.value_per_share) : "No positive value"}</td><td>${pct(v.margin_of_safety)}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
+    ${researchAnalysis(d)}
     <div class="philos">${philCard("buffett", "Buffett", sc.buffett, pass)}${philCard("munger", "Munger", sc.munger, pass)}${philCard("lynch", "Lynch", sc.lynch, pass)}</div></section>`
     : d.score_error ? `<div class="warn">Scoring failed: ${esc(d.score_error)}</div>` : `<div class="warn">No financials imported yet, so no Buffett/Munger/Lynch scores.</div>`}
   ${d.checks ? `<section class="box"><h3 style="margin-top:0">Data checks</h3>${checksList(d.checks)}

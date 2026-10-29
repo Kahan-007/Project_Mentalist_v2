@@ -115,6 +115,15 @@ def api_txn(q, body):
     return {"id": tid}
 
 
+def api_txn_correct(q, body):
+    b = json.loads(body)
+    changes = b["changes"]
+    allowed = {"kind", "symbol", "trade_date", "quantity", "price", "fees", "amount", "ratio", "exchange", "note"}
+    if not isinstance(changes, dict) or set(changes) - allowed:
+        raise ValueError("Unsupported transaction correction fields")
+    return {"id": portfolio.correct(b["id"], **changes)}
+
+
 def api_txn_delete(q, body):
     return {"deleted": portfolio.delete(json.loads(body)["id"])}
 
@@ -172,6 +181,7 @@ def api_stock(q, body):
     try:
         bars = prices.history(sym, exchange)
         closes = [b["close"] for b in bars]
+        out["price_health"] = prices.history_status(sym, exchange)
         out["price"] = {"last": closes[-1], "date": bars[-1]["date"], "series": [[b["date"], b["close"]] for b in bars[-250:]],
                         "high_52w": max(closes[-250:]), "low_52w": min(closes[-250:]),
                         "change_1y": closes[-1] / closes[-250] - 1 if len(closes) >= 250 else None}
@@ -188,6 +198,12 @@ def api_stock(q, body):
             if not r['data_quality']['issues'] and not r['provisional'] and r['valuation']['multiple']:
                 r['headroom'] = scoring.price_headroom(rec, None, size_ranks().get(sym), entry=sym not in portfolio.holdings())
             r['sensitivity'] = scoring.sensitivity(rec)
+            from . import valuation
+            out['valuation_research'] = valuation.for_record(rec)
+            out['experimental_score'] = scoring.score_company(rec, size_rank=size_ranks().get(sym), model='operating-v1')
+            out['model_comparison'] = recommendations.compare(sym in portfolio.holdings(), sym in sl, r,
+                                                               out['experimental_score'], out['valuation_research'])
+            out['valuation_inputs'] = rec.get('valuation_research') or {}
         except Exception as exc:
             out["score_error"] = f"{type(exc).__name__}: {exc}"
         out["sources"] = sources.for_record(rec, out.get("score"))
@@ -215,7 +231,12 @@ def _name_matches(file_name, symbol):
         return True
     a = set(re.findall(r"[a-z]{3,}", universe.short_name(u["name"]).lower()))
     b = set(re.findall(r"[a-z]{3,}", universe.short_name(file_name).lower()))
-    return bool(a & b) or not a or not b
+    generic = {'india','indian','industries','industrial','bank','banking','finance','financial','services',
+               'enterprises','power','energy','pharma','technologies','technology','global','international','group','holdings'}
+    distinctive_a, distinctive_b = a-generic, b-generic
+    if distinctive_a and distinctive_b:
+        return bool(distinctive_a & distinctive_b)
+    return a == b or not a or not b
 
 
 def api_import_financials(q, body):
@@ -807,7 +828,7 @@ GET = {"/api/portfolio": api_portfolio, "/api/universe": api_universe, "/api/sto
        "/api/settings": api_settings, "/api/top250": api_top250, "/api/verify-prices": api_verify_prices,
        "/api/price-job": api_price_job}
 POST = {"/api/presets": api_presets_action, "/api/notifications/read": api_notifications_read,
-        "/api/refresh-financials": api_refresh_financials, "/api/txn": api_txn, "/api/txn/delete": api_txn_delete, "/api/import/zerodha": api_import_zerodha,
+        "/api/refresh-financials": api_refresh_financials, "/api/txn": api_txn, "/api/txn/delete": api_txn_delete, "/api/txn/correct": api_txn_correct, "/api/import/zerodha": api_import_zerodha,
         "/api/import/financials": api_import_financials, "/api/manual": api_manual,
         "/api/shortlist/add": api_shortlist_add, "/api/shortlist/remove": api_shortlist_remove,
         "/api/shortlist/all-three": api_shortlist_all_three, "/api/run-daily": api_run_daily,
@@ -843,7 +864,9 @@ POST['/api/telegram/disconnect'] = api_telegram_disconnect
 
 def api_quality(q, body):
     from . import monitor, quality, research, risk
-    return {'monitor':monitor.status(), 'alerts':quality.report(), 'risk':risk.report(), 'research':research.report()}
+    return {'monitor':monitor.status(), 'alerts':quality.report(), 'risk':risk.report(), 'research':research.report(),
+            'refresh':storage.read_json(config.DATA/'autofill_state.json') or {},
+            'current_prices':storage.read_json(config.DATA/'current_price_status.json') or {}}
 
 
 def api_feedback(q, body):
@@ -879,6 +902,23 @@ def api_valuation_worksheet(q, body):
 POST['/api/valuation-worksheet'] = api_valuation_worksheet
 
 
+def api_valuation_research(q, body):
+    from . import valuation
+    symbol = _symbol(q)
+    rec = fundamentals.load(symbol)
+    if not rec:
+        raise ValueError('Import financials first')
+    inputs = json.loads(body)
+    result = valuation.scenarios(inputs, rec.get('meta',{}).get('market_cap'))
+    # Freeze reviewed assumptions with the company's record; no notification settings change.
+    rec['valuation_research'] = {**inputs, 'saved_at':config.now_ist().isoformat(), 'model_version':valuation.MODEL_VERSION}
+    storage.write_json(config.DATA/'fundamentals'/f'{symbol}.json', rec)
+    return result
+
+
+POST['/api/valuation-research'] = api_valuation_research
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -906,7 +946,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         try:
             self._send(200, fn(parse_qs(u.query), body))
-        except (ValueError, KeyError, portfolio.LedgerError, fundamentals.ImportError_) as exc:
+        except (ValueError, KeyError, TypeError, portfolio.LedgerError, fundamentals.ImportError_) as exc:
             self._send(400, {"error": str(exc)})
         except Exception as exc:
             with open(config.LOGS / "errors.log", "a", encoding="utf-8") as f:
@@ -939,7 +979,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Custom header + same-origin check: other websites can't trigger actions on this local server.
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._send(400, {"error":"invalid Content-Length"})
+        if self.headers.get('Transfer-Encoding'):
+            return self._send(400, {"error":"Transfer-Encoding is not supported"})
         if not self._local() or self.headers.get("X-Screener") != "1" or \
                 (self.headers.get("Origin") and self.headers.get("Origin") != f"http://{self.headers.get('Host')}"):
             if 0 < length <= MAX_BODY:

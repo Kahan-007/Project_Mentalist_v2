@@ -1,13 +1,18 @@
 """Ledger failures leave no committed transactions or audit entries."""
 import sqlite3
+import unittest
 from decimal import Decimal
 from unittest import mock
-from tests.test_portfolio import Ledger
+from tests import test_portfolio
 from india_screener import portfolio as pf, db as dbm, storage
 from pathlib import Path
 
 
-class Integrity(Ledger):
+class Integrity(unittest.TestCase):
+    setUp = test_portfolio.Ledger.setUp
+    tearDown = test_portfolio.Ledger.tearDown
+    add = test_portfolio.Ledger.add
+
     def test_delete_and_correct_roll_back_later_oversell(self):
         buy = self.add('BUY', 'INFY', '2025-01-01', quantity=10, price=100)
         self.add('SELL', 'INFY', '2025-01-02', quantity=8, price=120)
@@ -69,11 +74,57 @@ class Integrity(Ledger):
         path = Path(self.tmp.name)/'record.json'
         storage.write_json(path, {'value':1})
         replace = storage.os.replace
-        with mock.patch.object(storage.os, 'replace', side_effect=[PermissionError(), None]) as move, mock.patch.object(storage.time, 'sleep'):
+        attempts = []
+        def retry_once(source, target):
+            attempts.append(1)
+            if len(attempts) == 1: raise PermissionError()
+            return replace(source, target)
+        with mock.patch.object(storage.os, 'replace', side_effect=retry_once) as move, mock.patch.object(storage.time, 'sleep'):
             storage.write_json(path, {'value':2})
             self.assertEqual(move.call_count, 2)
+        self.assertEqual(storage.read_json(path), {'value':2})
         with mock.patch.object(storage.os, 'replace', side_effect=PermissionError()), mock.patch.object(storage.time, 'sleep'):
             with self.assertRaises(PermissionError):
                 storage.write_json(path, {'value':3})
-        self.assertEqual(storage.read_json(path), {'value':1})
+        self.assertEqual(storage.read_json(path), {'value':2})
         self.assertEqual(list(path.parent.glob('*.tmp')), [])
+
+    def test_concurrent_sells_cannot_both_spend_the_same_shares(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        self.add('BUY','TEST','2025-01-01',quantity=10,price=100)
+        ready=threading.Barrier(2)
+        def sell():
+            ready.wait()
+            try:return self.add('SELL','TEST','2025-02-01',quantity=8,price=100)
+            except pf.LedgerError:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(lambda _:sell(), range(2)))
+        self.assertEqual(sum(r is not None for r in results),1)
+        self.assertEqual(pf.positions(self.db)['TEST']['quantity'],2)
+
+    def test_v2_migration_preserves_all_existing_runtime_tables(self):
+        from india_screener import config, outbox
+        cfg=config.load_config();cfg['notify']={'windows_toast':False}
+        with dbm.connect(self.db) as db:
+            db.execute("INSERT INTO news(symbol,title,title_key,url,published_utc) VALUES('TEST','title','key','https://example.test','2026-01-01T00:00:00+00:00')")
+            db.execute("INSERT INTO events(symbol,event_session,status) VALUES('TEST','2026-01-01','dip_confirmed')")
+            db.execute("INSERT INTO recommendation_log(logged_at,symbol,reason,held,shortlisted) VALUES('2026-01-01','TEST','shortlisted',0,1)")
+            aid=outbox.enqueue('title','body','key',cfg,db)
+            db.execute("INSERT INTO app_notifications(created_at,kind,title) VALUES('2026-01-01','program','test')")
+            db.execute("INSERT INTO headline_audit VALUES(1,?,1,1,'queued','review','reason')",(aid,))
+            db.execute("INSERT INTO alert_feedback VALUES(?,'useful','','2026-01-01')",(aid,))
+            db.execute("INSERT INTO signal_state VALUES('TEST','watch','2026-01-01')")
+            db.execute("INSERT INTO signal_evidence(symbol) VALUES('TEST')")
+            db.execute("INSERT INTO signal_news VALUES(1,1)")
+            db.execute("INSERT INTO research_observation(observed_at,day,symbol,input_hash,analysis,financials,settings) VALUES('2026-01-01','2026-01-01','TEST','hash','{}','{}','{}')")
+            db.execute('DROP TABLE research_context')
+            db.execute('PRAGMA user_version=1')
+            tables=[r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            before={name:[tuple(r) for r in db.execute('SELECT * FROM '+name)] for name in tables}
+        for _ in range(2):
+            with dbm.connect(self.db) as db:
+                for name,rows in before.items():
+                    self.assertEqual([tuple(r) for r in db.execute('SELECT * FROM '+name)],rows,name)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],2)
+                self.assertEqual(db.execute('SELECT count(*) FROM research_context').fetchone()[0],0)

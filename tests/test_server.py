@@ -185,6 +185,31 @@ class Api(unittest.TestCase):
         code, d = self.call("/api/universe?q=diff")
         self.assertEqual([r["symbol"] for r in d], ["OTHER"])
 
+    def test_7_research_comparison_and_atomic_correction(self):
+        body=fx.to_xlsx(fx.quality_company(),name='Test Co Ltd')
+        code,d=self.call('/api/import/financials?symbol=TESTCO&basis=consolidated&sector=general&filename=t.xlsx',body,raw=True)
+        self.assertEqual(code,200,d)
+        assumptions={'kind':'FCFF','cash_flow_cr':100,'discount_rate':.1,'growth':0,'terminal_growth':0,
+                     'shares_cr':10,'debt_cr':200,'cash_cr':50,'reviewed':True,
+                     'as_of':config.now_ist().date().isoformat(),'source_note':'Synthetic reviewed source'}
+        code,d=self.call('/api/valuation-research?symbol=TESTCO',assumptions)
+        self.assertEqual(code,200,d)
+        code,d=self.call('/api/stock?symbol=TESTCO')
+        self.assertEqual(code,200,d)
+        self.assertEqual(len(d['valuation_research']['scenarios']),3)
+        self.assertEqual(d['experimental_score']['model_status'],'experimental comparison only')
+        self.assertAlmostEqual(d['valuation_research']['scenarios'][1]['equity_value_cr'],850)
+        code,d=self.call('/api/txn',{'kind':'BUY','symbol':'CORRECT','date':'2025-01-01','quantity':2,'price':100})
+        self.assertEqual(code,200,d)
+        tid=d['id']
+        code,d=self.call('/api/txn/correct',{'id':tid,'changes':{'price':90}})
+        self.assertEqual(code,200,d)
+        code,d=self.call('/api/portfolio')
+        p=next(p for p in d['positions'] if p['symbol']=='CORRECT')
+        self.assertEqual(p['avg_cost'],90)
+        code,d=self.call('/api/txn/correct',{'id':tid,'changes':{'path':'/tmp/forbidden.sqlite'}})
+        self.assertEqual(code,400,d)
+
 
 if __name__ == "__main__":
     unittest.main()
