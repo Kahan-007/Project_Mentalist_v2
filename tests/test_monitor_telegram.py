@@ -217,7 +217,8 @@ class DataGates(Isolated):
         r['quarters'] = {'dates':['2026-03-31','2026-06-30','2026-09-30','2026-12-31'],'net_profit':[]}
         self.assertIsNone(fundamentals.metrics(r)['ttm'])
         r['quarters']['net_profit'] = [10, 11, 12, 13]
-        self.assertEqual(fundamentals.metrics(r)['ttm']['net_profit'], 46)
+        with mock.patch.object(config, 'now_ist', return_value=dt.datetime(2027, 1, 1, tzinfo=config.IST)):
+            self.assertEqual(fundamentals.metrics(r)['ttm']['net_profit'], 46)
         r['quarters']['dates'][1] = '2026-03-31'
         self.assertIsNone(fundamentals.metrics(r)['ttm'])
 

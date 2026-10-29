@@ -48,6 +48,10 @@ def parse_nse(xml_bytes, watched):
             'published_utc': published.astimezone(dt.timezone.utc).isoformat(), 'categories': categorize(detail)})
     return result
 
+# A bare common word is not company evidence, even when a headline is capitalized.
+AMBIGUOUS_TICKERS = {'OIL','IDEA','PAGE','STAR','CARE','RAIN','CLEAN','FINE','HOME','FACT','MAST'}
+COMPANY_ALIASES = {'STAR': ('Strides Pharma',), 'CARE': ('CARE Ratings',)}
+
 CATEGORIES = {
     "merger/acquisition": ["merger", "mergers", "merge", "merges", "acquisition", "acquisitions", "acquire", "acquires", "acquired",
                            "takeover", "amalgamation", "demerger", "open offer", "buyout"],
@@ -73,15 +77,25 @@ def search_terms(name, symbol, aliases=()):
     # A bare ticker is only a useful search term if it's a real word-like token (e.g. ONGC, ITC), not 'LT'.
     if symbol and symbol.isalpha() and len(symbol) >= 3 and symbol.lower() != sn.lower():
         terms.append(symbol)
-    for a in aliases:
+    for a in (*COMPANY_ALIASES.get(symbol, ()), *aliases):
         if a and a not in terms:
             terms.append(a)
     return terms
 
 
 def _mentions(title, terms):
-    t = title.lower()
-    return any(re.search(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])", t) for term in terms)
+    for term in terms:
+        word = str(term).strip()
+        if word.upper() in AMBIGUOUS_TICKERS:
+            ticker = re.escape(word.upper())
+            explicit = rf'(?<![A-Za-z0-9])(?:NSE\s*[:\-]\s*{ticker}|{ticker}\.NS)(?![A-Za-z0-9])'
+            company_context = rf'(?<![A-Za-z0-9]){ticker}(?![A-Za-z0-9])\s+(?i:shares?|stock|Q[1-4] results|quarterly results)\b'
+            if re.search(explicit,title) or re.search(company_context,title):
+                return True
+            continue
+        if word and re.search(r'(?<![a-z0-9])'+re.escape(word.lower())+r'(?![a-z0-9])',title.lower()):
+            return True
+    return False
 
 
 def _kw_pattern(word):
@@ -101,7 +115,7 @@ def categorize(title):
 def parse_rss(xml_bytes, terms, now_utc=None, days=7, limit=40):
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
     root = ET.fromstring(xml_bytes)
-    items, seen = [], set()
+    by_key = {}
     for item in root.findall("./channel/item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
@@ -109,7 +123,7 @@ def parse_rss(xml_bytes, terms, now_utc=None, days=7, limit=40):
         if source and title.endswith(" - " + source):
             title = title[: -len(" - " + source)]
         key = re.sub(r"\W+", " ", title.lower()).strip()
-        if not title or key in seen or not link.startswith("https://"):
+        if not title or not link.startswith("https://"):
             continue
         try:
             published = email.utils.parsedate_to_datetime(item.findtext("pubDate") or "")
@@ -118,15 +132,15 @@ def parse_rss(xml_bytes, terms, now_utc=None, days=7, limit=40):
         except (TypeError, ValueError):
             continue
         age = (now_utc - published).total_seconds()
-        if not (-3600 <= age <= days * 86400):
+        if not (0 <= age <= days * 86400):
             continue
         if not _mentions(title, terms):
             continue
-        seen.add(key)
-        items.append({"title": title, "url": link, "source": source,
-                      "published_utc": published.astimezone(dt.timezone.utc).isoformat(),
-                      "categories": categorize(title)})
-    items.sort(key=lambda x: x["published_utc"], reverse=True)
+        stamp = published.astimezone(dt.timezone.utc).isoformat()
+        if key not in by_key or stamp < by_key[key]['published_utc']:
+            by_key[key] = {"title":title, "url":link, "source":source,
+                           "published_utc":stamp,"categories":categorize(title)}
+    items = sorted(by_key.values(), key=lambda x:x['published_utc'], reverse=True)
     return items[:limit]
 
 

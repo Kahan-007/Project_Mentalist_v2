@@ -5,6 +5,8 @@
        '--(full window, no abnormal drop)-> no_dip '--(too long, never levelled)--> expired
 """
 import json
+import datetime as dt
+import hashlib
 import re
 
 from . import db as dbm
@@ -15,16 +17,33 @@ def title_key(title):
     return re.sub(r"\W+", " ", title.lower()).strip()[:300]
 
 
+def store_headline(db, symbol, item):
+    key = ('nse:'+hashlib.sha256(item['url'].encode()).hexdigest() if item.get('source')=='NSE corporate announcement'
+           else title_key(item['title']))
+    cur = db.execute('INSERT OR IGNORE INTO news(symbol,title,title_key,url,source,published_utc,categories) VALUES(?,?,?,?,?,?,?)',
+                     (symbol,item['title'],key,item['url'],item.get('source',''),item['published_utc'],json.dumps(item.get('categories',[]))))
+    old = db.execute('SELECT * FROM news WHERE symbol=? AND title_key=?',(symbol,key)).fetchone()
+    if not cur.rowcount:
+        try:
+            new_time, old_time = (dt.datetime.fromisoformat(v) for v in (item['published_utc'],old['published_utc']))
+            if new_time.tzinfo and old_time.tzinfo and new_time < old_time and new_time <= dt.datetime.now(dt.timezone.utc):
+                db.execute('UPDATE news SET published_utc=? WHERE id=?',(new_time.astimezone(dt.timezone.utc).isoformat(),old['id']))
+                # An already published event is historical evidence; never silently rewrite its attribution.
+                event = db.execute('SELECT notified_dip,notified_level FROM events WHERE symbol=? AND event_session=?',
+                                   (symbol,old['event_session'])).fetchone()
+                if event and not (event['notified_dip'] or event['notified_level']):
+                    db.execute('UPDATE news SET event_session=NULL WHERE id=?',(old['id'],))
+                    db.execute("UPDATE events SET status='superseded' WHERE symbol=? AND event_session=? AND NOT EXISTS "
+                               '(SELECT 1 FROM news WHERE symbol=? AND event_session=?)',
+                               (symbol,old['event_session'],symbol,old['event_session']))
+        except (TypeError,ValueError):
+            pass
+    return old['id'], cur.rowcount
+
+
 def store_news(symbol, items, path=None):
-    added = 0
     with dbm.connect(path) as db:
-        for it in items:
-            cur = db.execute(
-                "INSERT OR IGNORE INTO news(symbol,title,title_key,url,source,published_utc,categories) VALUES(?,?,?,?,?,?,?)",
-                (symbol, it["title"], title_key(it["title"]), it["url"], it.get("source", ""),
-                 it["published_utc"], json.dumps(it.get("categories", []))))
-            added += cur.rowcount
-    return added
+        return sum(store_headline(db,symbol,item)[1] for item in items)
 
 
 def group_into_events(symbol, exchange, trading_dates, path=None):
@@ -51,48 +70,48 @@ def headlines_for(symbol, session, path=None):
 
 
 def evaluate(symbol, stock_bars, bench_bars, cfg, path=None, publish=True):
-    """Advance all open events for one symbol. Returns alert dicts for newly confirmed dips / levellings."""
+    """Evaluate newer dips before older stability; event state and deliveries commit together."""
     alerts = []
-    e_cfg, l_cfg = cfg["event"], cfg["levelling"]
-    dates = [b["date"] for b in stock_bars]
+    e_cfg, l_cfg = cfg['event'],cfg['levelling']
+    dates = [b['date'] for b in stock_bars]
     with dbm.connect(path) as db:
-        open_events = db.execute(
+        db.execute('BEGIN IMMEDIATE')
+        rows = [dict(r) for r in db.execute(
             "SELECT * FROM events WHERE symbol=? AND (status IN ('provisional','dip_confirmed') OR "
-            "(status='levelled' AND (notified_dip=0 OR notified_level=0))) ORDER BY event_session",
-            (symbol,)).fetchall()
-    for row in open_events:
-        session, status = row["event_session"], row["status"]
-        new_status, detail = status, json.loads(row["detail"])
-        if status == "provisional":
-            res = ev.assess_dip(stock_bars, bench_bars, session, e_cfg)
-            if res["status"] in ("dip_confirmed", "no_dip", "insufficient_data"):
-                new_status = res["status"]
-            detail = {"dip": res}
-        if new_status == "dip_confirmed":
-            lev = ev.assess_levelling(stock_bars, bench_bars, session, e_cfg, l_cfg)
-            detail["levelling"] = lev
-            since = len([d for d in dates if d >= session])
-            if lev.get("levelled"):
-                new_status = "levelled"
-            elif since > e_cfg["expire_after_sessions"]:
-                new_status = "expired"
-        with dbm.connect(path) as db:
-            db.execute("UPDATE events SET status=?, detail=?, updated_at=datetime('now') WHERE id=?",
-                       (new_status, json.dumps(detail, default=str), row["id"]))
-            if new_status == "dip_confirmed" and status == "provisional":
-                # A fresh confirmed dip makes older 'waiting to level' events ambiguous; retire them.
-                db.execute("UPDATE events SET status='superseded', updated_at=datetime('now') "
-                           "WHERE symbol=? AND status='dip_confirmed' AND event_session<?", (symbol, session))
-            if new_status in ("dip_confirmed", "levelled") and not row["notified_dip"]:
-                alerts.append({"type": "dip", "symbol": symbol, "session": session, "detail": detail})
-                if publish:
-                    queue_event(alerts[-1], cfg, db)
-                    db.execute("UPDATE events SET notified_dip=1 WHERE id=?", (row["id"],))
-            if new_status == "levelled" and not row["notified_level"]:
-                alerts.append({"type": "levelled", "symbol": symbol, "session": session, "detail": detail})
-                if publish:
-                    queue_event(alerts[-1], cfg, db)
-                    db.execute("UPDATE events SET notified_level=1 WHERE id=?", (row["id"],))
+            "(status='levelled' AND (notified_dip=0 OR notified_level=0))) ORDER BY event_session", (symbol,))]
+        latest_new = None
+        for row in rows:
+            detail = json.loads(row['detail'])
+            row['next_status'] = row['status']
+            if row['status']=='provisional':
+                result = ev.assess_dip(stock_bars,bench_bars,row['event_session'],e_cfg)
+                detail['dip'] = result
+                if result['status'] in ('dip_confirmed','no_dip','insufficient_data'):
+                    row['next_status']=result['status']
+                if row['next_status']=='dip_confirmed':
+                    latest_new=row['event_session']
+            row['parsed_detail']=detail
+        for row in rows:
+            session, state, detail = row['event_session'],row['next_status'],row['parsed_detail']
+            if latest_new and session < latest_new and state in ('dip_confirmed','levelled'):
+                state='superseded'
+            if state=='dip_confirmed':
+                level = ev.assess_levelling(stock_bars,bench_bars,session,e_cfg,l_cfg)
+                detail['levelling']=level
+                if level.get('levelled'):
+                    state='levelled'
+                elif sum(d>=session for d in dates)>e_cfg['expire_after_sessions']:
+                    state='expired'
+            db.execute("UPDATE events SET status=?,detail=?,updated_at=datetime('now') WHERE id=?",
+                       (state,json.dumps(detail,default=str),row['id']))
+            for kind, flag in (('dip','notified_dip'),('levelled','notified_level')):
+                applicable = state in ('dip_confirmed','levelled') if kind=='dip' else state=='levelled'
+                if applicable and not row[flag]:
+                    alert={'type':kind,'symbol':symbol,'session':session,'detail':detail}
+                    alerts.append(alert)
+                    if publish:
+                        queue_event(alert,cfg,db)
+                        db.execute(f'UPDATE events SET {flag}=1 WHERE id=?',(row['id'],))
     return alerts
 
 

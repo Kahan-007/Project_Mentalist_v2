@@ -24,16 +24,32 @@ class InsufficientData(Exception):
 
 
 def align(stock_bars, bench_bars):
-    bm = {b["date"]: b for b in bench_bars}
-    return [(s, bm[s["date"]]) for s in stock_bars if s["date"] in bm]
+    maps = []
+    for bars in (stock_bars,bench_bars):
+        by_date = {}
+        for b in bars:
+            if b['date'] in by_date:
+                raise InsufficientData('duplicate daily session')
+            if not isinstance(b.get('adjclose'),(int,float)) or not math.isfinite(b['adjclose']) or b['adjclose'] <= 0:
+                raise InsufficientData('invalid adjusted close')
+            by_date[b['date']] = b
+        maps.append(by_date)
+    sm,bm = maps
+    common = sorted(sm.keys() & bm.keys())
+    if common and any(d not in sm for d in bm if common[0] <= d <= common[-1]):
+        raise InsufficientData('missing stock sessions within benchmark history')
+    return [(sm[d],bm[d]) for d in common]
 
 
 def event_session(published_utc_iso, trading_dates):
     """First session in which the news could be traded on. None if that session isn't in the data yet."""
-    t = dt.datetime.fromisoformat(published_utc_iso).astimezone(config.IST)
+    t = dt.datetime.fromisoformat(published_utc_iso)
+    if t.tzinfo is None:
+        raise InsufficientData('publication timezone required')
+    t = t.astimezone(config.IST)
     day = t.date().isoformat()
     after_close = t.time() >= config.MARKET_CLOSE
-    for td in trading_dates:
+    for td in sorted(set(trading_dates)):
         if td > day or (td == day and not after_close):
             return td
     return None
@@ -47,7 +63,7 @@ def _r(pairs, i, which):
 def market_model(pairs, e, ev):
     end = e - ev["gap_sessions"]
     start = max(1, end - ev["estimation_sessions"])
-    if end - start < ev["min_estimation_sessions"]:
+    if end - start < max(3, ev["min_estimation_sessions"]):
         raise InsufficientData(f"need {ev['min_estimation_sessions']} estimation sessions, have {max(0, end - start)}")
     ys = [_r(pairs, i, "stock") for i in range(start, end)]
     xs = [_r(pairs, i, "bench") for i in range(start, end)]
@@ -82,7 +98,10 @@ def _tr_pct(pairs, i):
 
 
 def assess_dip(stock_bars, bench_bars, session_date, ev):
-    pairs = align(stock_bars, bench_bars)
+    try:
+        pairs = align(stock_bars, bench_bars)
+    except InsufficientData as exc:
+        return {'status':'insufficient_data','reason':str(exc)}
     if not pairs:
         return {"status": "insufficient_data", "reason": "no overlapping stock/benchmark sessions"}
     e = _index_of(pairs, session_date)
@@ -133,11 +152,17 @@ def assess_levelling(stock_bars, bench_bars, session_date, ev, lv):
       2. no drift:  |abnormal return over last N| <= drift_sigma_max * sigma * sqrt(N)
       3. base held: the post-event low is older than `no_new_low_sessions` sessions
     """
-    pairs = align(stock_bars, bench_bars)
+    try:
+        pairs = align(stock_bars, bench_bars)
+    except InsufficientData as exc:
+        return {'levelled':False,'reason':str(exc)}
     e = _index_of(pairs, session_date)
     if e is None or e < 15:
         return {"levelled": False, "reason": "event session missing or too early in history"}
-    mm = market_model(pairs, e, ev)
+    try:
+        mm = market_model(pairs, e, ev)
+    except InsufficientData as exc:
+        return {'levelled':False,'reason':str(exc)}
     N = lv["sessions"]
     after = len(pairs) - (e + ev["window_sessions"])
     needed = max(N, lv["min_sessions_after_event"])
@@ -159,10 +184,14 @@ def assess_levelling(stock_bars, bench_bars, session_date, ev, lv):
     recent_atr = statistics.fmean(_tr_pct(pairs, i) for i in range(len(pairs) - N, len(pairs)))
     drift = sum(_ar(pairs, i, mm) for i in range(len(pairs) - N, len(pairs)))
     drift_limit = lv["drift_sigma_max"] * mm["sigma"] * math.sqrt(N)
+    # A deep event-day wick must not hide a continuing slide in subsequent sessions.
+    post_lows = lows[1:] or lows
+    _, post_low_i = min(post_lows, key=lambda pair:(pair[0],-pair[1]))
     checks = {
         "calm": recent_atr <= lv["atr_ratio_max"] * pre_atr,
         "no_drift": abs(drift) <= drift_limit,
         "base_held": trough_i < len(pairs) - lv["no_new_low_sessions"],
+        "post_event_base_held": post_low_i < len(pairs) - lv["no_new_low_sessions"],
     }
     return {**base, "levelled": all(checks.values()), "checks": checks,
             "atr_ratio": recent_atr / pre_atr if pre_atr > 0 else None,

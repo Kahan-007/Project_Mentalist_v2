@@ -51,9 +51,7 @@ def ingest(item, heads, cfg):
             key = tracker.title_key(h['title'])
             if h.get('source') == 'NSE corporate announcement':
                 key = 'nse:' + hashlib.sha256(h['url'].encode()).hexdigest()
-            db.execute('INSERT OR IGNORE INTO news(symbol,title,title_key,url,source,published_utc,categories) VALUES(?,?,?,?,?,?,?)',
-                       (item['symbol'], h['title'], key, h['url'], h.get('source',''), h['published_utc'], json.dumps(h.get('categories', []))))
-            nid = db.execute('SELECT id FROM news WHERE symbol=? AND title_key=?', (item['symbol'],key)).fetchone()[0]
+            nid, _ = tracker.store_headline(db, item['symbol'], h)
             audited = db.execute('SELECT disposition FROM headline_audit WHERE news_id=?', (nid,)).fetchone()
             if audited:
                 if audited['disposition'] != 'future':

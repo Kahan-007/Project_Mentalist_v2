@@ -36,7 +36,7 @@ def format_alert(a, item):
     if a["type"] == "dip":
         title = f"{a['symbol']}: news-linked abnormal drop on {a['session']}"
         lines.append(f"Abnormal return {_pct(d.get('abnormal_return'))} vs threshold -{d.get('threshold', 0) * 100:.2f}% "
-                     f"(z = {d.get('z_score', 0):.1f}); raw {_pct(d.get('raw_return'))}, Nifty {_pct(d.get('market_return'))}.")
+                     f"(z = {format(d['z_score'], '.1f') if d.get('z_score') is not None else 'n/a'}); raw {_pct(d.get('raw_return'))}, Nifty {_pct(d.get('market_return'))}.")
         if d.get("volume_ratio") is not None:
             lines.append(f"Volume {d['volume_ratio']:.1f}x normal.")
     else:
@@ -60,8 +60,8 @@ def run(cfg=None, send_alerts=True):
     errors, alerts = {}, []
     auto = autofill.run()   # G-Sec yield daily; NPA % and year-end prices weekly
     for name, res in auto.items():
-        if isinstance(res, dict) and res.get("error"):
-            errors[f"autofill:{name}"] = res["error"]
+        if isinstance(res, dict) and (res.get("error") or res.get('status') in ('failed','partial')):
+            errors[f"autofill:{name}"] = res.get('error') or f"{res['status']} refresh; previous valid values retained"
     bench = prices.benchmark(cfg)
     trading_dates = [b["date"] for b in bench]
     cur = price_snapshot.refresh(cfg=cfg, benchmark_date=bench[-1]["date"])   # one NSE file, Yahoo fallback
@@ -174,7 +174,7 @@ def write_report(today, bench, items, bars_by_symbol, formatted, errors, analyse
     for sym, p in sorted(portfolio.positions().items()):
         bars = bars_by_symbol.get(sym)
         last = bars[-1]["close"] if bars else None
-        value = float(p["quantity"]) * last if last is not None else None
+        value = 0.0 if not p["quantity"] else float(p["quantity"]) * last if last is not None else None
         unreal = value - float(p["invested"]) if value is not None else None
         fmt = lambda x: "n/a" if x is None else f"{x:,.2f}"
         out.append(f"| {sym} | {p['quantity']} | {fmt(float(p['avg_cost']))} | {fmt(last)} | {fmt(value)} | {fmt(unreal)} | "
