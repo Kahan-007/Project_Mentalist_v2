@@ -1,5 +1,7 @@
 """Polite HTTP: timeouts, size cap, gzip, shared 429 back-off, limited retries."""
 import gzip
+import io
+import math
 import json
 import random
 import re
@@ -44,14 +46,17 @@ def fetch(url, *, timeout=15, retries=2, headers=None, data=None):
                 if len(body) > MAX_BYTES:
                     raise FetchError("response too large")
                 if resp.headers.get("Content-Encoding") == "gzip":
-                    body = gzip.decompress(body)
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                        body = stream.read(4 * MAX_BYTES + 1)
                     if len(body) > 4 * MAX_BYTES:
                         raise FetchError("decompressed response too large")
                 return body
         except HTTPError as exc:
+            exc.close()
             if exc.code == 429:
                 try:
-                    retry = max(30.0, float(exc.headers.get("Retry-After", "60")))
+                    retry = float(exc.headers.get("Retry-After", "60"))
+                    retry = min(3600, max(30, retry)) if math.isfinite(retry) else 60
                 except (TypeError, ValueError):
                     retry = 60.0
                 _set_backoff(urlsplit(url).netloc, retry * (attempt + 1))

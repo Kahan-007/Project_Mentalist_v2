@@ -7,6 +7,7 @@ line-item layout and runs them through workbook.build_record. Records from both 
 scored identically. Nothing is estimated: a row Screener doesn't publish stays empty.
 """
 import html
+import copy
 import json
 import re
 from urllib.parse import quote
@@ -66,7 +67,7 @@ def _table(sec):
 def _num(s):
     s = (s or "").replace(",", "").replace("%", "").strip()
     try:
-        return float(s)
+        return fundamentals._num(s)
     except ValueError:
         return None
 
@@ -169,38 +170,65 @@ def _build(symbol, page, consolidated, url):
     return rec
 
 
-def merge_refresh(new, old):
+def merge_refresh(new, old, *, preserve_export=True):
     """Combine a freshly fetched record with the stored one. Returns (record to save or None, what changed).
     Never goes backwards (an older latest year), keeps your manual entries and business-type choice, keeps
     year-end prices already filled for matching years, and keeps a fresher daily closing price."""
+    new = copy.deepcopy(new)
+    if new.get('symbol') != old.get('symbol') or new.get('basis') != old.get('basis'):
+        raise ValueError('issuer/accounting basis differs; review before replacing stored financials')
+    if new['years'] != sorted(set(new['years'])) or new['years'][-1] > config.now_ist().date().isoformat():
+        raise ValueError('invalid annual period sequence')
     if new["years"][-1] < old["years"][-1]:
         return None, "Screener's latest year is older than the stored one; kept stored figures"
     is_export = bool((old.get("quarters") or {}).get("dates")) and not str(old.get("source", "")).startswith("Screener.in public page")
     newer_year = new["years"][-1] > old["years"][-1]
     oq, nq = (old.get("quarters") or {}).get("dates") or [], (new.get("quarters") or {}).get("dates") or []
     newer_quarter = bool(nq) and (not oq or nq[-1] > oq[-1])
-    if is_export and not newer_year:
+    if preserve_export and is_export and not newer_year:
         if newer_quarter:
-            import copy
             merged = copy.deepcopy(old)
-            merged['quarters'] = new['quarters']
+            merged['quarters'] = fundamentals.merge_quarters(old.get('quarters') or {}, new['quarters'])
             merged['quarter_source'] = new.get('source')
+            merged['quarter_fetched_at'] = config.now_ist().isoformat()
             merged['imported_at'] = config.now_ist().isoformat()
             return merged, 'new quarter ' + nq[-1][:7] + '; preserved imported annual statements'
         return None, "kept your Screener export (Screener has no newer annual year)"
-    if oq and (not nq or oq[-1] > nq[-1]):
-        new['quarters'] = old['quarters']
-    for k in ("manual", "manual_source", "mcap_rank", "screener_industry"):
+    new['quarters'] = fundamentals.merge_quarters(old.get('quarters') or {}, new.get('quarters') or {})
+    for k in ("manual", "manual_source", "mcap_rank", "screener_industry", "valuation_research"):
         if old.get(k) is not None:
             new[k] = old[k]
     if old.get("sector_type_set_by_user"):
         new["sector_type"], new["sector_type_set_by_user"] = old["sector_type"], True
+    # A short public-page response must not erase the older history used for cycle tests.
+    fetched_years = list(new['years'])
+    new['years'] = sorted(set(old['years']) | set(fetched_years))
+    new['series'] = {key:[dict(zip(fetched_years,values)).get(year) for year in new['years']]
+                     for key,values in new['series'].items()}
     prices_by_year = dict(zip(old["years"], (old.get("series") or {}).get("price") or []))
     new["series"]["price"] = [prices_by_year.get(y) for y in new["years"]]
+    retained = []
+    for key, values in (old.get('series') or {}).items():
+        if key == 'price':
+            continue
+        by_year = dict(zip(old['years'], values))
+        current = new['series'].get(key) or []
+        new['series'][key] = []
+        for i, year in enumerate(new['years']):
+            value = current[i] if i < len(current) else None
+            if value is None and by_year.get(year) is not None:
+                value = by_year[year]
+                retained.append(f'{key}:{year}')
+            new['series'][key].append(value)
+    new['refresh_provenance'] = {'source':new.get('source'), 'fetched_at':config.now_ist().isoformat(),
+                               'retained_cells':retained, 'retained_source':old.get('source'),
+                               'retained_periods':sorted(set(old['years'])-set(fetched_years))}
     om, shares = old.get("meta") or {}, (new["meta"].get("shares") or 0) / 1e7
-    if om.get("price_date") and om.get("price") and shares:
-        new["meta"].update(price=om["price"], market_cap=om["price"] * shares, market_cap_date=om["price_date"],
-                           price_date=om["price_date"], price_source=om.get("price_source"))
+    old_date = om.get('price_date') or om.get('market_cap_date') or ''
+    new_date = new['meta'].get('price_date') or new['meta'].get('market_cap_date') or ''
+    if old_date and old_date >= new_date and om.get("price") and shares:
+        new["meta"].update(price=om["price"], market_cap=om["price"] * shares, market_cap_date=old_date,
+                           price_date=old_date, price_source=om.get("price_source"))
     new["imported_at"] = config.now_ist().isoformat()
     what = ("new annual results " + new["years"][-1][:4] if newer_year else "") + \
            (("; " if newer_year else "") + "new quarter " + nq[-1][:7] if newer_quarter else "")
@@ -217,10 +245,7 @@ def refresh(symbols=None, pause=1.5, progress=None):
         if not old:
             continue
         try:
-            try:
-                new = fetch(sym, basis=old.get("basis"))
-            except ValueError:     # e.g. the stored basis has no annual figures on Screener: try the other accounts
-                new = fetch(sym)
+            new = fetch(sym, basis=old.get("basis"))
             rec, what = merge_refresh(new, old)
             if rec is None:
                 kept.append(f"{sym}: {what}")
@@ -232,7 +257,9 @@ def refresh(symbols=None, pause=1.5, progress=None):
         if progress:
             progress(i, len(syms))
         time.sleep(pause)
-    return {"updated": updated, "unchanged": len(unchanged), "kept": kept, "failed": failed, "checked": len(syms)}
+    successes = len(updated) + len(unchanged) + len(kept)
+    return {"updated": updated, "unchanged": len(unchanged), "kept": kept, "failed": failed, "checked": len(syms),
+            "status": 'partial' if failed and successes else 'failed' if failed else 'success'}
 
 
 def save(rec):
@@ -243,6 +270,9 @@ def save(rec):
     if old.get("sector_type_set_by_user"):
         rec["sector_type"], rec["sector_type_set_by_user"] = old["sector_type"], True
     rec["imported_at"] = config.now_ist().isoformat()
+    if old:
+        rec, _ = merge_refresh(rec, old)
+        rec = rec or old
     storage.write_json(config.DATA / "fundamentals" / f"{rec['symbol']}.json", rec)
     _add_to_size_universe(rec)
 

@@ -16,7 +16,7 @@ def nice_date(iso):
 def financials(rec):
     src = rec.get("source") or ""
     if src.startswith("Top 250 workbook"):
-        return "the Top 250 workbook (Screener.in tables retrieved 24-Sep-2026)"
+        return f"the Top 250 workbook ({src}); import time does not establish the source snapshot date"
     if src.startswith("Screener.in public page"):
         when = src.rsplit("retrieved ", 1)[-1].rstrip(")") if "retrieved " in src else rec.get("imported_at")
         return f"Screener.in public company page, fetched {nice_date(when)}"
@@ -49,7 +49,7 @@ def for_record(rec, score=None):
         "pe": f"P/E = market cap ({px}) / net profit for {((score or {}).get('pe_basis') or 'FY ' + last_year)} ({fin})",
         "pb": f"P/B = market cap ({px}) / book value (equity) at {last_year} ({fin})",
         "roce": f"ROCE = EBIT / average (equity + borrowings), year to {last_year}. Calculated from {fin}",
-        "roic": f"ROIC = EBIT x (1 - tax rate) / average (equity + borrowings - cash), year to {last_year}. Calculated from {fin}",
+        "roic": f"Operating ROIC = (PBT + interest − other income) x (1 − observed tax rate) / average (equity + borrowings - cash), year to {last_year}. Calculated from {fin}",
         "roe": f"ROE = net profit / average equity, year to {last_year}. Calculated from {fin}",
         "scores": f"Calculated by the program from {fin}, the {px}, and the ownership / NPA figures",
         "manual": {},

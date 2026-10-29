@@ -218,6 +218,8 @@ def fill_all_prices(progress=None):
         try:
             if workbook.fill_prices(sym, prices.history(sym, rng="10y")):
                 ok += 1
+            else:
+                failed.append(f"{sym}: no usable year-end prices returned")
         except Exception as exc:
             failed.append(f"{sym}: {str(exc)[:120]}")
         if progress:
@@ -236,7 +238,7 @@ def refresh_financials():
     from . import screener_fetch
     r = screener_fetch.refresh()
     report_financials_refresh(r)
-    return {"updated": len(r["updated"]), "unchanged": r["unchanged"], "kept": len(r["kept"]), "failed": len(r["failed"])}
+    return {"updated": len(r["updated"]), "unchanged": r["unchanged"], "kept": len(r["kept"]), "failed": len(r["failed"]), "status": r.get("status", "success")}
 
 
 def report_financials_refresh(r):
@@ -249,28 +251,59 @@ def report_financials_refresh(r):
     if r["failed"]:
         appnotify.program(f"Financials refresh: {len(r['failed'])} companies could not be read",
                           "\n".join(f"{k}: {v}" for k, v in list(r["failed"].items())[:40]) +
-                          "\n\nTheir previous figures are kept. It is retried next week.", key="fin-refresh-failed")
+                          "\n\nTheir previous figures are kept. Failed or partial batches are retried after one day.", key="fin-refresh-failed")
 
 
 # ---------------------------------------------------------------- scheduling
 
 def run(force=False, weekly_days=7):
     """G-Sec every call; NPA, ownership and year-end prices once every `weekly_days` unless force; the Screener
-    financials refresh weekly during results season only. Errors are reported, not raised."""
+    financials refresh weekly throughout the year. Errors are reported, not raised."""
     state = storage.read_json(STATE_PATH) or {}
     today = config.now_ist().date()
     out = {}
     jobs = [("gsec", update_gsec, 0), ("financials", refresh_financials, weekly_days), ("gnpa", fill_gnpa, weekly_days),
             ("ownership", fill_ownership, weekly_days), ("prices", fill_all_prices, weekly_days)]
+    details = state.setdefault('jobs', {})
     for name, fn, every in jobs:
+        previous = details.get(name, {})
         last = state.get(name)
-        if not force and last and (today - dt.date.fromisoformat(last)).days < every:
-            out[name] = f"skipped (last run {last})"
-            continue
         try:
-            out[name] = fn()
-            state[name] = today.isoformat()
+            due = dt.date.fromisoformat(previous['next_retry']) if previous.get('next_retry') else None
+            age = (today - dt.date.fromisoformat(last)).days if last else None
+        except (TypeError, ValueError):
+            due, age = None, None
+        if not force and ((due and today < due) or (not due and age is not None and 0 <= age < every)):
+            out[name] = f"skipped (last successful run {last}; next retry {due})"
+            continue
+        stamp = config.now_ist().isoformat()
+        details[name] = {**previous, 'status':'running', 'attempted_at':stamp,
+                         'next_retry':(today+dt.timedelta(days=1)).isoformat()}
+        storage.write_json(STATE_PATH, state)  # interrupted work is visible and retried
+        try:
+            res = fn()
+            status = batch_status(name, res)
+            out[name] = {**res, 'status':status} if isinstance(res, dict) else res
+            details[name].update(status=status, result=out[name])
+            if status == 'success':
+                state[name] = today.isoformat()
+                details[name].update(last_success=stamp, next_retry=None)
+            else:
+                details[name]['next_retry'] = (today+dt.timedelta(days=1)).isoformat()
         except Exception as exc:
-            out[name] = {"error": f"{type(exc).__name__}: {exc}"}
-    storage.write_json(STATE_PATH, state)
+            out[name] = {'error': f'{type(exc).__name__}: {exc}', 'status':'failed'}
+            details[name].update(status='failed', result=out[name])
+        storage.write_json(STATE_PATH, state)
     return out
+
+
+def batch_status(name, result):
+    if not isinstance(result, dict):
+        return 'success'
+    if result.get('status') in ('success', 'partial', 'failed'):
+        return result['status']
+    count = lambda v: len(v) if isinstance(v, (list, dict)) else int(v or 0)
+    failed = count(result.get('failed')) + count(result.get('not_found'))
+    partial = count(result.get('partial'))
+    successful = sum(count(result.get(k)) for k in ('updated','unchanged','kept','filled','kept_user_value','kept_user_values'))
+    return 'partial' if partial or (failed and successful) else 'failed' if failed else 'success'

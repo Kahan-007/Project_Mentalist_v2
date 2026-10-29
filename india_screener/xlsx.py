@@ -9,10 +9,14 @@ NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
       "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
       "pr": "http://schemas.openxmlformats.org/package/2006/relationships"}
 MAX_UNCOMPRESSED = 60_000_000
+MAX_GRID_CELLS = 2_000_000
 
 
 def _col(ref):
-    letters = re.match(r"[A-Z]+", ref).group(0)
+    match = re.fullmatch(r"([A-Z]{1,3})[1-9][0-9]*", ref or '')
+    if not match:
+        raise ValueError('invalid spreadsheet cell reference')
+    letters = match.group(1)
     n = 0
     for ch in letters:
         n = n * 26 + ord(ch) - 64
@@ -46,22 +50,33 @@ def read_workbook(file_like):
 def _read_sheet(xml_bytes, shared):
     root = ET.fromstring(xml_bytes)
     grid = {}
+    next_row = 0
     for row in root.iter("{%s}row" % NS["m"]):
-        r = int(row.get("r")) - 1
+        r = int(row.get("r")) - 1 if row.get('r') else next_row
+        next_row = r + 1
+        if not 0 <= r < MAX_GRID_CELLS:
+            raise ValueError('spreadsheet row outside supported bounds')
+        next_col = 0
         for c in row.findall("m:c", NS):
             t, v = c.get("t"), c.find("m:v", NS)
             if t == "s" and v is not None:
                 val = shared[int(v.text)]
             elif t == "inlineStr":
                 val = "".join(x.text or "" for x in c.iter("{%s}t" % NS["m"]))
-            elif t in ("str", "e"):
+            elif t == 'e':
+                val = None
+            elif t == "str":
                 val = v.text if v is not None else None
             elif t == "b":
                 val = bool(int(v.text)) if v is not None else None
             else:
                 val = float(v.text) if v is not None and v.text not in (None, "") else None
-            grid.setdefault(r, {})[_col(c.get("r"))] = val
+            col = _col(c.get('r')) if c.get('r') else next_col
+            next_col = col + 1
+            grid.setdefault(r, {})[col] = val
     if not grid:
         return []
     width = max(max(cols) for cols in grid.values()) + 1
+    if width * (max(grid) + 1) > MAX_GRID_CELLS:
+        raise ValueError('spreadsheet grid too large')
     return [[grid.get(r, {}).get(c) for c in range(width)] for r in range(max(grid) + 1)]

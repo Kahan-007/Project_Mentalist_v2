@@ -101,7 +101,7 @@ class Refresh(unittest.TestCase):
         self.assertIsNone(screener_fetch.merge_refresh(rec(["2024-03-31", "2025-03-31"]), old)[0])
         export = rec(["2025-03-31", "2026-03-31"], ["2026-03-31"], source="Infosys.xlsx")
         out, reason = screener_fetch.merge_refresh(rec(["2025-03-31", "2026-03-31"], ["2026-06-30"]), export)
-        self.assertEqual(out["quarters"]["dates"], ["2026-06-30"])
+        self.assertEqual(out["quarters"]["dates"], ["2026-03-31", "2026-06-30"])
         self.assertEqual(out["series"], export["series"])
         self.assertEqual(out["source"], "Infosys.xlsx")
 
@@ -118,7 +118,7 @@ class ReturnsAndSources(unittest.TestCase):
         self.assertAlmostEqual(m["roce"][i], ebit / ((ce(i) + ce(i - 1)) / 2))
         ic = lambda j: ce(j) - (s["cash"][j] or 0)
         t = min(0.4, max(0.0, s["tax"][i] / s["pbt"][i]))
-        self.assertAlmostEqual(m["roic"][i], ebit * (1 - t) / ((ic(i) + ic(i - 1)) / 2))
+        self.assertAlmostEqual(m["roic"][i], (ebit - s["other_income"][i]) * (1 - t) / ((ic(i) + ic(i - 1)) / 2))
 
     def test_source_text(self):
         r = rec(["2026-03-31"])

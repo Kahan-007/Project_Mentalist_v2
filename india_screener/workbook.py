@@ -14,7 +14,7 @@ import io
 import math
 import re
 
-from . import config, fundamentals, index250, storage, xlsx
+from . import config, fundamentals, index250, storage, xlsx, financial_math
 
 YEARS = [f"FY{y}" for y in range(2017, 2027)]
 FLOW_KEYS = {"sales", "other_income", "depreciation", "interest", "pbt", "tax", "net_profit", "dividend",
@@ -135,7 +135,7 @@ def build_record(c, it, per_list, retrieved):
                 if s.get(k) and s[k][i] is not None:
                     s[k][i] *= f
             notes.append(f"{years[i][:7]} covered {mth} months; profit and cash-flow items annualised")
-    shares_now = next((x for x in reversed(s["shares_cr"]) if x), None)
+    shares_now = s["shares_cr"][-1]
     mcap = num(c.get("Market Cap (INR crore)"))
     meta = {"market_cap": mcap, "shares": shares_now * 1e7 if shares_now else None,
             "price": mcap / shares_now if mcap and shares_now else None,
@@ -149,13 +149,17 @@ def build_record(c, it, per_list, retrieved):
            "isin": c.get("ISIN"), "mcap_rank": int(num(c.get("Market-cap Rank")) or 0) or None,
            "source": f"Top 250 workbook (Screener tables retrieved {retrieved})",
            "years": years, "series": s, "meta": meta, "quarters": {"dates": []},
+           "share_provenance":{"historical":"inferred weighted-average adjusted shares from profit-for-EPS / EPS",
+                               "current":"latest available weighted-average shares; verify current outstanding shares"},
            "period_notes": notes + ([str(c["Company Notes"])] if c.get("Company Notes") else [])}
     return rec, None
 
 
-def import_workbook(data: bytes, keep_exports=True):
+def import_workbook(data: bytes, keep_exports=True, retrieved=None):
     companies, items, per = parse(data)
-    retrieved = "2026-09-24"
+    # Import time is not the source snapshot date. Undated snapshots remain undated.
+    if retrieved is not None:
+        retrieved = dt.date.fromisoformat(retrieved).isoformat()
     universe, imported, merged, skipped = [], [], [], []
     for c in companies:
         sym = c.get("NSE Symbol")
@@ -173,17 +177,23 @@ def import_workbook(data: bytes, keep_exports=True):
         if keep_exports and existing and existing.get("quarters", {}).get("dates"):
             # A Screener export is richer (quarters, year-end prices). Keep it; add what the workbook knows better.
             by_year = dict(zip(rec["years"], rec["series"]["capex_reported"]))
-            existing["series"]["capex_reported"] = [by_year.get(y) for y in existing["years"]]
+            prior = dict(zip(existing["years"], existing["series"].get("capex_reported", [])))
+            existing["series"]["capex_reported"] = [by_year.get(y) if by_year.get(y) is not None else prior.get(y) for y in existing["years"]]
             existing["mcap_rank"] = rec["mcap_rank"]
             existing.setdefault("screener_industry", rec["screener_industry"])
             storage.write_json(config.DATA / "fundamentals" / f"{sym}.json", existing)
             merged.append(sym)
             continue
+        if existing and existing["years"][-1] > rec["years"][-1]:
+            skipped.append({"symbol":sym, "reason":"stored financial years are newer"})
+            continue
         if existing:
+            if existing.get("valuation_research"):
+                rec["valuation_research"] = existing["valuation_research"]
             rec["manual"] = existing.get("manual", {})
             rec["manual_source"] = existing.get("manual_source", {})
             old_meta, shares = existing.get("meta") or {}, (rec["meta"].get("shares") or 0) / 1e7
-            if old_meta.get("price_date") and old_meta["price_date"] >= retrieved and old_meta.get("price") and shares:
+            if old_meta.get("price_date") and old_meta["price_date"] >= (retrieved or "") and old_meta.get("price") and shares:
                 # keep a fresher daily close (e.g. NSE) instead of the workbook's snapshot
                 rec["meta"].update(price=old_meta["price"], market_cap=old_meta["price"] * shares,
                                    market_cap_date=old_meta["price_date"], price_date=old_meta["price_date"],
@@ -237,13 +247,14 @@ def apply_latest_prices(text: str):
         rec = fundamentals.load(sym)
         if not rec:
             continue
-        shares = next((x for x in reversed(rec["series"].get("shares_cr") or []) if x), None)
+        shares, _ = financial_math.current_shares(rec)
         if not shares:
             skipped.append(sym)
             continue
         rec["meta"]["price"] = price
         rec["meta"]["market_cap"] = price * shares
         rec["meta"]["market_cap_date"] = today
+        rec["meta"]["price_date"] = today
         rec["meta"]["price_source"] = "latest price snapshot (user-provided)"
         storage.write_json(config.DATA / "fundamentals" / f"{sym}.json", rec)
         updated.append(sym)
@@ -264,9 +275,9 @@ def update_current_price(symbol, price, as_of, source="current-price snapshot"):
         raise ValueError(f"{symbol}: current price must be positive")
     if day > config.now_ist().date().isoformat():
         raise ValueError(f"{symbol}: current price date {day} is in the future")
-    if str(rec.get("meta", {}).get("price_date") or "")[:10] > day:
+    if str(rec.get("meta", {}).get("price_date") or rec.get("meta", {}).get("market_cap_date") or "")[:10] > day:
         return "stale"
-    shares = next((x for x in reversed(rec["series"].get("shares_cr") or []) if x), None)
+    shares, _ = financial_math.current_shares(rec)
     if not shares:
         return False
     meta = rec.setdefault("meta", {})
@@ -289,7 +300,7 @@ def fill_prices(symbol, bars):
         if prior and (dt.date.fromisoformat(y) - dt.date.fromisoformat(prior[-1])).days <= 7:
             prices[i] = closes[prior[-1]]
     rec["series"]["price"] = prices
-    shares = next((x for x in reversed(rec["series"].get("shares_cr") or []) if x), None)
+    shares, _ = financial_math.current_shares(rec)
     newer = str(rec["meta"].get("price_date") or "")[:10] > bars[-1]["date"]   # e.g. today's NSE close
     if shares and not newer:
         rec["meta"]["price_date"] = bars[-1]["date"]

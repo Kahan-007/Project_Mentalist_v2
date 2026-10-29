@@ -38,7 +38,9 @@ class RealExports(unittest.TestCase):
         for sym, (rec, _) in self.recs.items():
             res = {c["check"]: c["status"] for c in verify.check_export(rec)}
             self.assertEqual(res.get("Balance sheet balances"), "ok", sym)
-            self.assertEqual(res.get("Cash flows add up"), "ok", sym)
+            rows = zip(*(rec['series'].get(k, []) for k in ('cfo','cfi','cff','net_cash_flow')))
+            comparable = any(all(v is not None for v in row) for row in rows)
+            self.assertEqual(res.get("Cash flows add up"), "ok" if comparable else "skip", sym)
 
     def test_every_company_scores(self):
         for sym, (rec, _) in self.recs.items():

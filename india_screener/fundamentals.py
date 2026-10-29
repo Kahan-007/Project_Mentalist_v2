@@ -5,27 +5,29 @@ Input: Screener.in 'Export to Excel' workbook (sheet 'Data Sheet'), or a CSV lai
 Choose the CONSOLIDATED view on Screener before exporting whenever the company has subsidiaries.
 """
 import csv
+import copy
 import datetime as dt
 import io
 import math
 import re
 import statistics
 
-from . import config, storage, xlsx
+from . import config, storage, xlsx, financial_math
 
 SECTOR_TYPES = ("general", "bank", "nbfc", "insurance")
 BASES = ("consolidated", "standalone")
 
 LABELS = {
     "pl": {"sales": "sales", "revenue": "sales", "other income": "other_income", "depreciation": "depreciation",
-           "interest": "interest", "profit before tax": "pbt", "tax": "tax", "net profit": "net_profit",
+           "interest": "interest", "profit before tax": "pbt", "tax": "tax", "net profit": "net_profit", "operating ebit": "operating_ebit",
            "dividend amount": "dividend"},
     "bs": {"equity share capital": "share_capital", "reserves": "reserves", "borrowings": "borrowings",
            "other liabilities": "other_liabilities", "total": "total", "net block": "net_block",
            "capital work in progress": "cwip", "investments": "investments", "other assets": "other_assets",
            "receivables": "receivables", "inventory": "inventory", "cash & bank": "cash", "cash and bank": "cash"},
     "cf": {"cash from operating activity": "cfo", "cash from investing activity": "cfi",
-           "cash from financing activity": "cff", "net cash flow": "net_cash_flow"},
+           "cash from financing activity": "cff", "net cash flow": "net_cash_flow",
+           "capital expenditure": "capex_reported"},
     "q": {"sales": "sales", "revenue": "sales", "expenses": "expenses", "other income": "other_income",
           "depreciation": "depreciation", "interest": "interest", "profit before tax": "pbt", "tax": "tax",
           "net profit": "net_profit", "operating profit": "operating_profit"},
@@ -49,7 +51,8 @@ def _num(v):
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return float(v) if math.isfinite(v) else None
     try:
-        return float(str(v).replace(",", "").strip())
+        value = float(str(v).replace(",", "").strip())
+        return value if math.isfinite(value) else None
     except ValueError:
         return None
 
@@ -150,9 +153,29 @@ def save(symbol, parsed, basis, sector_type, source_name, industry=None):
     existing = load(symbol) or {}
     record = {"symbol": symbol, "basis": basis, "sector_type": sector_type, "source": source_name,
               "industry": industry or existing.get("industry"),
-              "imported_at": config.now_ist().isoformat(), "manual": existing.get("manual", {}), **parsed}
+              "imported_at": config.now_ist().isoformat(), "manual": existing.get("manual", {}),
+              "manual_source": existing.get("manual_source", {}), **parsed}
+    if existing.get('valuation_research'):
+        record['valuation_research'] = existing['valuation_research']
+    if existing:
+        from .screener_fetch import merge_refresh
+        merged, _ = merge_refresh(record, existing, preserve_export=False)
+        record = merged or existing
     storage.write_json(config.DATA / "fundamentals" / f"{symbol}.json", record)
     return record
+
+
+def merge_quarters(old, new):
+    """Merge by date and field, retaining richer old rows when a provider omits them."""
+    dates = sorted(set(old.get('dates', [])) | set(new.get('dates', [])))
+    result = {'dates': dates}
+    for key in (set(old) | set(new)) - {'dates'}:
+        if not isinstance(old.get(key, new.get(key)), list):
+            continue
+        by_date = dict(zip(old.get('dates', []), old.get(key, [])))
+        by_date.update({d: v for d, v in zip(new.get('dates', []), new.get(key, [])) if v is not None})
+        result[key] = [by_date.get(d) for d in dates]
+    return result
 
 
 def needs_year_end_prices(rec):
@@ -212,7 +235,7 @@ def cagr(first, last, years):
     return (last / first) ** (1 / years) - 1
 
 
-def metrics(rec):
+def metrics(rec, operating=False):
     s, years = rec["series"], rec["years"]
     n = len(years)
     sales, np_, pbt, intr = (_get(s, k) for k in ("sales", "net_profit", "pbt", "interest"))
@@ -238,32 +261,29 @@ def metrics(rec):
     roe = [(_at(np_, i) / avg_base(eq, i)) if _ok(_at(np_, i), avg_base(eq, i)) and avg_base(eq, i) > 0 else None for i in range(n)]
     roce = [(ebit[i] / avg_base(ce, i)) if _ok(ebit[i], avg_base(ce, i)) and avg_base(ce, i) > 0 else None for i in range(n)]
     roa = [(_at(np_, i) / avg_base(total, i)) if _ok(_at(np_, i), avg_base(total, i)) and avg_base(total, i) > 0 else None for i in range(n)]
-    # ROIC = NOPAT / average invested capital, where NOPAT = EBIT x (1 - tax rate) and invested capital =
-    # equity + borrowings - cash (cash earns interest, it isn't capital the business needs). The tax rate is
-    # the year's own effective rate kept within 0-40%; in a year with no pre-tax profit, India's 25.17% base rate.
-    tax = _get(s, "tax")
-
-    def tax_rate(i):
-        t, p = _at(tax, i), _at(pbt, i)
-        return min(0.40, max(0.0, t / p)) if _ok(t, p) and p > 0 else 0.2517
-
-    ic = [(ce[i] - cash[i]) if _ok(ce[i], _at(cash, i)) else None for i in range(n)]
-    roic = [(ebit[i] * (1 - tax_rate(i)) / avg_base(ic, i)) if _ok(ebit[i], avg_base(ic, i)) and avg_base(ic, i) > 0 else None
-            for i in range(n)]
-    capex_est = [(_at(nb, i) - _at(nb, i - 1) + (_at(cwip, i) or 0) - (_at(cwip, i - 1) or 0) + _at(dep, i))
-                 if i > 0 and _ok(_at(nb, i), _at(nb, i - 1), _at(dep, i)) else None for i in range(n)]
+    operating_data = financial_math.operating_returns(rec)
+    roic = operating_data['roic']
+    if operating:
+        roce = operating_data['roce']
+        ebit = operating_data['ebit']
+    capex_est = [(_at(nb, i) - _at(nb, i - 1) + _at(cwip, i) - _at(cwip, i - 1) + _at(dep, i))
+                 if i > 0 and _ok(_at(nb, i), _at(nb, i - 1), _at(dep, i), _at(cwip, i), _at(cwip, i - 1)) else None for i in range(n)]
     # Prefer reported cash spent on fixed assets (the standard FCF definition). The balance-sheet estimate
     # is the fallback; it also counts acquired intangibles, so it overstates capex for acquisitive firms.
     capex_rep = _get(s, "capex_reported")
     capex = [(_at(capex_rep, i) if _at(capex_rep, i) is not None else capex_est[i]) for i in range(n)]
-    capex_source = "reported" if any(v is not None for v in capex_rep) else "estimated from balance sheet"
+    capex = [v if financial_math.finite(v) and v >= 0 else None for v in capex]
+    capex_sources = ['reported' if _at(capex_rep,i) is not None and capex[i] is not None else
+                     'estimated from balance sheet' if capex[i] is not None else 'unavailable' for i in range(n)]
+    capex_source = capex_sources[0] if len(set(capex_sources)) == 1 else 'mixed: see per-period sources'
+
     fcf = [(_at(cfo, i) - capex[i]) if _ok(_at(cfo, i), capex[i]) else None for i in range(n)]
     eps = ratio(np_, shares)
     bvps = ratio(eq, shares)
 
     meta = rec.get("meta", {})
     price = meta.get("price") or _at(_get(s, "price"), n - 1)
-    shares_now = (meta["shares"] / 1e7) if meta.get("shares") else _at(shares, n - 1)
+    shares_now, shares_source = financial_math.current_shares(rec)
     mcap = meta.get("market_cap") or (price * shares_now if _ok(price, shares_now) else None)
 
     def window(lst, k):
@@ -278,13 +298,20 @@ def metrics(rec):
         idx = [i for i in range(max(0, n - k - 1), n) if _at(lst, i) is not None]
         if len(idx) < 2 or idx[-1] - idx[0] < min_span:
             return None
-        spans[name] = idx[-1] - idx[0]
+        try:
+            first_date,last_date = (dt.date.fromisoformat(years[j]) for j in (idx[0],idx[-1]))
+            span = ((last_date.year-first_date.year)*12+last_date.month-first_date.month)/12
+        except (ValueError,TypeError):
+            return None
+        if span < min_span:
+            return None
+        spans[name] = span
         first, last_v = lst[idx[0]], lst[idx[-1]]
         if last_v <= 0:
             return -1.0          # ended at a loss: growth test fails outright
         if first <= 0:
             return None          # growth from a loss base is undefined, not zero growth
-        return cagr(first, last_v, idx[-1] - idx[0])
+        return cagr(first, last_v, span)
 
     def paired_ratio(a, b, k, minimum=3):
         pairs = [(_at(a, i), _at(b, i)) for i in range(max(0, n-k), n) if _ok(_at(a, i), _at(b, i))]
@@ -293,13 +320,14 @@ def metrics(rec):
 
     last = n - 1
     m = {
-        "years": years, "n_years": n, "capex_source": capex_source,
+        "years": years, "n_years": n, "capex_source": capex_source, "capex_sources": capex_sources,
+        "operating_returns": operating_data, "share_evidence": financial_math.share_evidence(rec),
         "roe": roe, "roce": roce, "roic": roic, "roa": roa, "eps": eps, "bvps": bvps, "fcf": fcf, "capex": capex, "equity": eq,
         "ebit_margin": [ebit[i] / sales[i] if _ok(ebit[i], _at(sales, i)) and sales[i] > 0 else None for i in range(n)],
         "de_ratio": [debt[i] / eq[i] if eq[i] and eq[i] > 0 and _at(debt, i) is not None else None for i in range(n)],
         "interest_cover": (ebit[last] / intr[last]) if _ok(ebit[last], _at(intr, last)) and intr[last] > 0 else
                           (math.inf if _at(intr, last) == 0 and ebit[last] is not None and ebit[last] > 0 else None),
-        "price": price, "market_cap": mcap, "shares_cr": shares_now,
+        "price": price, "market_cap": mcap, "shares_cr": shares_now, "shares_source":shares_source,
         "net_profit_last": _at(np_, last),
         "pe": (mcap / np_[last]) if _ok(mcap, _at(np_, last)) and np_[last] > 0 else None,
         "pb": (mcap / eq[last]) if _ok(mcap, eq[last]) and eq[last] > 0 else None,
@@ -327,14 +355,10 @@ def metrics(rec):
     q = rec.get("quarters") or {}
     qd, qnp, qs = q.get("dates", []), q.get("net_profit", []), q.get("sales", [])
     m["ttm"] = None
-    try:
-        quarter_dates = [dt.date.fromisoformat(d) for d in qd[-4:]]
-        contiguous = len(quarter_dates) == 4 and all(80 <= (b-a).days <= 100 for a,b in zip(quarter_dates, quarter_dates[1:]))
-    except ValueError:
-        contiguous = False
-    if contiguous and len(qnp) == len(qd) and all(v is not None for v in qnp[-4:]) and qd[-1] > years[-1]:
+    contiguous, m['ttm_unavailable_reason'] = financial_math.quarterly_sequence(q)
+    if contiguous and qd[-1] > years[-1]:
         m["ttm"] = {"to": qd[-1], "net_profit": sum(qnp[-4:]),
-                    "sales": sum(qs[-4:]) if len(qs) >= 4 and all(v is not None for v in qs[-4:]) else None}
+                    "sales": sum(qs[-4:]) if len(qs) == len(qd) and all(financial_math.finite(v) for v in qs[-4:]) else None}
         if mcap and m["ttm"]["net_profit"] > 0:
             m["pe"] = mcap / m["ttm"]["net_profit"]
             m["pe_basis"] = f"trailing 12 months to {qd[-1]}"
@@ -346,8 +370,8 @@ def metrics(rec):
     # Retained-earnings ('$1') test over up to 5 years, needs price and shares at both ends.
     k = min(5, n - 1)
     p0, s0, p1, s1 = _at(_get(s, "price"), last - k), _at(shares, last - k), _at(_get(s, "price"), last), _at(shares, last)
-    retained = [(_at(np_, i) - (_at(div, i) or 0)) for i in range(last - k + 1, last + 1) if _at(np_, i) is not None]
-    if _ok(p0, s0, p1, s1) and retained and sum(retained) > 0:
+    retained = [(_at(np_, i) - _at(div, i)) for i in range(last - k + 1, last + 1) if _ok(_at(np_, i), _at(div, i))]
+    if _ok(p0, s0, p1, s1) and len(retained) == k and retained and sum(retained) > 0:
         m["retained_test"] = (p1 * s1 - p0 * s0) / sum(retained)
     else:
         m["retained_test"] = None

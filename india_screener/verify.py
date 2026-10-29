@@ -36,10 +36,11 @@ def check_export(rec, today=None):
         out.append(_r("Balance sheet balances", "skip", "assets total not in file"))
 
     cfo, cfi, cff, net = get("cfo"), get("cfi"), get("cff"), get("net_cash_flow")
+    checked_cf = sum(None not in values for values in zip(cfo,cfi,cff,net))
     bad = [y for y, a, b, c, d in zip(years, cfo, cfi, cff, net)
            if None not in (a, b, c, d) and abs(a + b + c - d) > max(1.0, 0.01 * max(abs(a), abs(b), abs(c)))]
-    out.append(_r("Cash flows add up", "ok" if not bad else "warn",
-                  "operating + investing + financing = net in every year" if not bad else f"mismatch in {', '.join(bad)}"))
+    out.append(_r("Cash flows add up", "skip" if not checked_cf else "warn" if bad else "ok",
+                  "no complete comparable cash-flow rows" if not checked_cf else f"checked {checked_cf} years" if not bad else f"mismatch in {', '.join(bad)}"))
 
     pbt, tax, np_ = get("pbt"), get("tax"), get("net_profit")
     assoc, mino = get("associates"), get("minority")
@@ -89,11 +90,11 @@ def check_export(rec, today=None):
                       f"adjusted {sh[-1]:,.2f} cr vs outstanding {cnt[-1] / 1e7:,.2f} cr; a split or bonus may not be reflected"))
 
     age = (today - dt.date.fromisoformat(fy_end)).days
-    out.append(_r("Annual data is recent", "ok" if age <= 15 * 30 else "warn",
+    out.append(_r("Annual data is recent", "ok" if 0 <= age <= 15 * 30 else "warn",
                   f"last annual report {fy_end}" + ("" if age <= 15 * 30 else "; export a fresh file")))
     if qd:
         qage = (today - dt.date.fromisoformat(qd[-1])).days
-        out.append(_r("Quarterly data is recent", "ok" if qage <= 200 else "warn", f"last quarter {qd[-1]}"))
+        out.append(_r("Quarterly data is recent", "ok" if 0 <= qage <= 200 else "warn", f"last quarter {qd[-1]}"))
     out.append(_r("Years of history", "ok" if len(years) >= 8 else "warn",
                   f"{len(years)} annual reports" + ("" if len(years) >= 8 else "; 10 are recommended")))
     return out
