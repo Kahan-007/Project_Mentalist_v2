@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _INIT_LOCK = threading.Lock()
 
 SCHEMA = """

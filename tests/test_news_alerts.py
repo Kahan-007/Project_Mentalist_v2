@@ -213,6 +213,10 @@ class NewsAlerts(Isolated):
             with self.assertRaises(ValueError):
                 news_alerts.quote_record(self.rec, {**quote, **changed}, self.cfg)
         self.rec['series']['shares_cr'][-1] = 0
+        # Current outstanding shares are independent of weighted-average EPS shares.
+        self.rec['meta']['shares'] = None
+        for key in ('shares_count', 'share_capital', 'face_value_row'):
+            if self.rec['series'].get(key): self.rec['series'][key][-1] = None
         with self.assertRaises(ValueError):
             news_alerts.quote_record(self.rec, quote, self.cfg)
 
@@ -235,7 +239,8 @@ class NewsAlerts(Isolated):
             self.assertEqual(monitor.scan_signals_once(), 0)
         self.assertEqual(self.state(), 'buy')
         with dbm.connect() as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM research_observation').fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM research_context WHERE origin='saved model observation'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM research_context WHERE origin='confirmed transition'").fetchone()[0], 2)
         self.assertIn('confirmed model buy', telegram.command('/stock TEST'))
 
     def test_event_alerts_stay_local_and_all_mode_restores_push(self):

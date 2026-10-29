@@ -88,10 +88,11 @@ def quote_record(record, quote, cfg, now=None):
         limit = settings(cfg)['quote_max_age_minutes']*60 if during_market else 4*86400
         if age > limit:
             raise ValueError('quote is outside the freshness limit')
-        saved_day = str(record.get('meta', {}).get('price_date') or '')[:10]
+        saved_day = str(record.get('meta', {}).get('price_date') or record.get('meta', {}).get('market_cap_date') or '')[:10]
         if saved_day and stamp.date().isoformat() < saved_day:
             raise ValueError('quote is older than the saved price')
-        shares = next((s for s in reversed(record.get('series', {}).get('shares_cr', [])) if s is not None), None)
+        from .financial_math import current_shares
+        shares, _ = current_shares(record)
         if isinstance(shares, bool) or not isinstance(shares, (int, float)) or not math.isfinite(shares) or shares <= 0:
             raise ValueError('valid share count unavailable')
     except (KeyError, TypeError, OverflowError) as exc:
@@ -106,6 +107,9 @@ def quote_record(record, quote, cfg, now=None):
 def evidence(item, record, st, indicative=False, size_rank=None, algorithm=None):
     """Freeze input identity independently of price, for honest price-versus-input attribution."""
     inputs = copy.deepcopy(record or {})
+    # Advisory worksheets and refresh bookkeeping cannot waive live quote confirmation.
+    for key in ('valuation_research', 'refresh_provenance', 'imported_at', 'quarter_fetched_at'):
+        inputs.pop(key, None)
     meta = inputs.setdefault('meta', {})
     for key in ('price', 'market_cap', 'price_date', 'market_cap_date', 'price_source', 'price_time'):
         meta.pop(key, None)
@@ -225,7 +229,16 @@ def recommendation_text(item, analysis, why, prior, current, context, previous, 
     lines.append(f"Source: {meta.get('price_source') or 'saved financial record'}")
     if context.get('indicative'):
         lines.append(f"Indicative, possibly delayed quote; {settings(cfg)['confirmations']} distinct samples required for a change.")
+    lines.append(f"Model version: {(analysis or {}).get('algorithm_version','unknown')} · production legacy policy. Experimental comparisons are excluded.")
     lines.append(f"Why: {why}")
+    note = (analysis or {}).get('valuation',{}).get('note')
+    if note:
+        lines.append('Valuation assumptions: '+note)
+    before = (previous or {}).get('model',{}).get('criteria',{})
+    after = context.get('model',{}).get('criteria',{})
+    changed = [key for key,value in after.items() if key in before and before[key] != value]
+    if changed:
+        lines.append('Changed criteria: '+', '.join(changed[:8]))
     if detail.get('threshold_price'):
         lines.append(f"Crossed boundary: about ₹{detail['threshold_price']:,.2f}, with financials and settings held fixed.")
     else:

@@ -32,17 +32,19 @@ DEFAULT_SETTINGS = {
 }
 
 
-def valuation(m, rec, st):
+def valuation(m, rec, st, cycle_policy="legacy"):
     """Conservative value estimate (Rs cr) and price-to-value multiple: DCF for companies, justified P/B for
     lenders and insurers. multiple is None when no positive value can be estimated (e.g. negative free cash flow)."""
     if rec["sector_type"] != "general":
         value, note = justified_pb_value(m, st)
         method = "justified price-to-book"
     else:
-        value, note = dcf_value(m, st, cyclical=lynch_category(m, rec, st) == "cyclical")
+        value, note = dcf_value(m, st, cyclical=lynch_category(m, rec, st, cycle_policy) == "cyclical")
         method = "discounted free cash flow"
     mult = (m["market_cap"] / value) if value and value > 0 and m.get("market_cap") else None
     return {"value_cr": value, "multiple": mult, "method": method, "note": note,
+            "model_version":"legacy-screening-v1" if cycle_policy == "legacy" else "legacy-screening-cycle-v1",
+            "production":cycle_policy == "legacy",
             "limitation": 'Approximate screening valuation; cash-flow classification and discount-rate calibration need review.'
             if rec['sector_type']=='general' else 'Simplified book-value model; not a sector-specific appraisal.'}
 
@@ -143,8 +145,8 @@ def dcf_value(m, st, cyclical=False):
 def justified_pb_value(m, st):
     """For lenders: justified P/B = (ROE - g) / (ke - g), applied to current book value."""
     roes = _vals(m["roe"], 5)
-    eq = _vals(m["equity"])
-    if len(roes) < 3 or not eq:
+    eq = m["equity"]
+    if len(roes) < 3 or not eq or eq[-1] is None or eq[-1] <= 0:
         return None, "need 3+ years of ROE"
     roe = statistics.median(roes)
     ke = st["risk_free"] + st["equity_premium"] + 0.01      # extra 1% for leverage risk
@@ -164,7 +166,7 @@ def margin_of_safety(value, mcap):
 
 # ------------------------------------------------------------------ philosophies
 
-def buffett(m, rec, st):
+def buffett(m, rec, st, cycle_policy="legacy"):
     fin = rec["sector_type"] != "general"
     roe = _vals(m["roe"], 10)
     frac15 = sum(r >= 0.15 for r in roe) / len(roe) if len(roe) >= 4 else None
@@ -194,7 +196,7 @@ def buffett(m, rec, st):
                   "zero at 3%, full at 14% a year"),
                 C("margin_of_safety", "Margin of safety (justified P/B)", 20, linear(mos, -0.25, 0.25), pct(mos), note)]
     else:
-        value, note = dcf_value(m, st, cyclical=lynch_category(m, rec, st) == "cyclical")
+        value, note = dcf_value(m, st, cyclical=lynch_category(m, rec, st, cycle_policy) == "cyclical")
         mos = margin_of_safety(value, m["market_cap"])
         out += [C("low_debt", "Low debt / equity", 15, linear(_last(m["de_ratio"]), 1.5, 0.5), num(_last(m["de_ratio"])),
                   "full marks <=0.5, zero at 1.5"),
@@ -313,7 +315,11 @@ def is_cyclical_industry(rec):
     return ind in CYCLICAL_INDUSTRIES or bool(CYCLICAL_WORDS.search(ind))
 
 
-def lynch_category(m, rec, st):
+def lynch_category(m, rec, st, policy="legacy"):
+    if policy not in ("legacy", "sector-first-v1"):
+        raise ValueError("Unknown cyclical classification policy")
+    if policy == "sector-first-v1" and rec["sector_type"] == "general" and is_cyclical_industry(rec):
+        return "cyclical"
     g = m["eps_cagr_5"]
     eps = _vals(m["eps"], 6)
     if m["n_years"] < 7 and is_cyclical_industry(rec):
@@ -335,9 +341,34 @@ def lynch_category(m, rec, st):
     return "slow grower"
 
 
-def lynch(m, rec, st):
+def cycle_assessment(m, rec, st):
+    """Expose the same diagnostic even when legacy classification skips it.
+    A median of available annual EPS is a proxy, not proof of a complete cycle.
+    Negative earnings remain in the sample; missing years are never zero-filled.
+    """
+    pairs = list(zip(m['years'], m['eps']))[-10:]
+    usable = [(year, eps) for year, eps in pairs if eps is not None and math.isfinite(eps)]
+    median = statistics.median(eps for _, eps in usable) if len(usable) >= 3 else None
+    npe = m['price']/median if median is not None and median > 0 and m.get('price') and m['price'] > 0 else None
+    score = 0.0 if median is not None and median <= 0 else linear(npe,25,10)
+    exposed = rec['sector_type'] == 'general' and is_cyclical_industry(rec)
+    category = lynch_category(m,rec,st)
+    return {'industry_flag':exposed, 'legacy_category':category,
+            'comparison_category':lynch_category(m,rec,st,'sector-first-v1'),
+            'legacy_omits_cycle_test':exposed and category != 'cyclical',
+            'median_eps':median, 'normalised_pe':npe, 'criterion_score':score,
+            'observations':len(usable), 'periods':[year for year,_ in usable],
+            'missing_periods':[year for year,eps in pairs if eps is None],
+            'short_history':len(usable)<7, 'policy_version':'sector-first-v1',
+            'note':'Same rule for each flagged industry: price / median of up to 10 available annual EPS values, including losses. '
+                   'Full credit at 10x or below; zero at 25x or above; essential test requires 20x or below. '
+                   'History lengths and cycle phases can differ. A six-year or even ten-year median does not establish a full cycle. '
+                   'Broad industry tags require business-specific review; the comparison does not change live signals.'}
+
+
+def lynch(m, rec, st, cycle_policy="legacy"):
     man = rec.get("manual", {})
-    category = lynch_category(m, rec, st)
+    category = lynch_category(m, rec, st, cycle_policy)
     g = m["eps_cagr_5"]
     dy = m["dividend_yield"] or 0.0
     ratio = ((g * 100 + dy * 100) / m["pe"]) if g is not None and m["pe"] else None
@@ -347,12 +378,10 @@ def lynch(m, rec, st):
     size = m.get("size") or size_bucket(m["market_cap"], st)
     if category == "cyclical":
         # Lynch: with cyclicals a low P/E often marks peak earnings. Value them on mid-cycle (median) earnings instead.
-        eps_all = _vals(m["eps"], 10)
-        med = statistics.median(eps_all) if len(eps_all) >= 3 else None
-        npe = (m["price"] / med) if med and med > 0 and m["price"] else None
-        npe_score = (0.0 if med is not None and med <= 0 else linear(npe, 25, 10))
+        cycle = cycle_assessment(m, rec, st)
+        npe, npe_score = cycle['normalised_pe'], cycle['criterion_score']
         out = [C("normalised_pe", "P/E on mid-cycle earnings (cyclical)", 25, npe_score, num(npe, 1),
-                 f"price / median EPS of {len(eps_all)} years (current P/E {num(m['pe'], 1)} may reflect a peak); full <=10, zero >=25"),
+                 f"price / median EPS of {cycle['observations']} years (current P/E {num(m['pe'], 1)} may reflect a peak); full <=10, zero >=25"),
                C("survive_downturn", "Can survive a downturn", 15, linear(m["interest_cover"], 2.0, 6.0), num(m["interest_cover"]),
                  "interest cover; full >=6x")]
     else:
@@ -371,7 +400,7 @@ def lynch(m, rec, st):
            C("room_to_grow", "Size leaves room to grow", 5, {"small": 1.0, "mid": 0.6, "large": 0.3}.get(size), size or "n/a",
              "small 100%, mid 60%, large 30%")]
     if rec["sector_type"] == "general":
-        net_cash = ((m.get("cash") or 0) - (m.get("debt") or 0)) / m["market_cap"] if m["market_cap"] else None
+        net_cash = (m["cash"]-m["debt"]) / m["market_cap"] if m["market_cap"] and m.get("cash") is not None and m.get("debt") is not None else None
         inv_gap = (m["inv_cagr_5"] - m["sales_cagr_5"]) if m["inv_cagr_5"] is not None and m["sales_cagr_5"] is not None else None
         out += [C("balance_sheet", "Strong balance sheet", 10, linear(_last(m["de_ratio"]), 1.0, 0.35), num(_last(m["de_ratio"])),
                   "debt/equity; full <=0.35"),
@@ -390,8 +419,7 @@ def lynch(m, rec, st):
 
 
 def _last(lst):
-    v = _vals(lst)
-    return v[-1] if v else None
+    return lst[-1] if lst else None
 
 
 def summarise(criteria, st, philosophy=None):
@@ -411,7 +439,15 @@ def summarise(criteria, st, philosophy=None):
     deduction = sum((1 - c["score"]) * c["weight"] for c in flags if c["score"] is not None)
     score = max(0.0, base - deduction) if base is not None else None
     coverage = w / total if total else 0
+    unknown_penalty = sum(c['weight'] for c in flags if c['score'] is None)
+    conservative = max(0.0, 100*sum(c['weight']*c['score'] for c in have)/total-deduction-unknown_penalty) if total else None
+    for c in criteria:
+        c['state'] = ('unknown' if c['score'] is None else 'passed' if c['score'] >= c.get('essential_min', 1.0) else 'failed')
     return {"score": round(score, 1) if score is not None else None,
+            'conservative_score':round(conservative,1) if conservative is not None else None,
+            'unknown_red_flags':[c['label'] for c in flags if c['score'] is None],
+            'unassessed_penalty_points':unknown_penalty,
+            'score_note':'Legacy score rescales available core criteria; conservative score keeps all weights and reserves unknown red-flag deductions.',
             "base_score": round(base, 1) if base is not None else None,
             "deductions": round(deduction, 1), "coverage": round(coverage, 2),
             "reliable": coverage >= st["min_coverage"],
@@ -520,26 +556,41 @@ def fundamentals_metrics(rec, size_rank, st):
     return m
 
 
-def score_company(rec, st=None, size_rank=None, headroom=False):
+def score_company(rec, st=None, size_rank=None, headroom=False, model="legacy"):
+    if model not in ("legacy", "operating-v1"):
+        raise ValueError("Unknown scoring model")
     from .fundamentals import metrics
     st = st or settings()
-    m = metrics(rec)
+    m = metrics(rec, operating=model == "operating-v1")
+    cycle_policy = "sector-first-v1" if model == "operating-v1" else "legacy"
     m["size"] = size_bucket(m["market_cap"], st, size_rank)
     result = {"symbol": rec["symbol"], "name": rec.get("name"), "basis": rec["basis"], "sector_type": rec["sector_type"],
               "years": f"{m['years'][0]} to {m['years'][-1]}", "n_years": m["n_years"],
               "market_cap_cr": m["market_cap"], "size": m["size"], "size_basis": "rank" if size_rank else "cut-offs",
               "pe": m["pe"], "pe_basis": m.get("pe_basis"), "pb": m["pb"], "ttm": m.get("ttm"),
-              "lynch_category": lynch_category(m, rec, st),
-              "buffett": summarise(buffett(m, rec, st), st, "buffett"),
+              "lynch_category": lynch_category(m, rec, st, cycle_policy),
+              "cycle_assessment": cycle_assessment(m, rec, st),
+              "buffett": summarise(buffett(m, rec, st, cycle_policy), st, "buffett"),
               "munger": summarise(munger(m, rec, st), st, "munger"),
-              "lynch": summarise(lynch(m, rec, st), st, "lynch")}
+              "lynch": summarise(lynch(m, rec, st, cycle_policy), st, "lynch")}
     # Latest-year and 5-year-median returns on capital. For banks, NBFCs and insurers borrowed money is the raw
     # material, not financing, so ROCE/ROIC aren't meaningful; ROE and ROA are their equivalents.
     med5 = lambda k: statistics.median(_vals(m[k], 5)) if len(_vals(m[k], 5)) >= 3 else None
     result["returns"] = {"applicable": rec["sector_type"] == "general", "year": m["years"][-1],
                          **{k: _last(m[k]) for k in ("roce", "roic", "roe")},
                          **{k + "_5y": med5(k) for k in ("roce", "roic", "roe")}}
-    result["valuation"] = valuation(m, rec, st)
+    if model == 'operating-v1':
+        for philosophy in ('buffett','munger','lynch'):
+            summary = result[philosophy]
+            summary['legacy_normalized_score'] = summary['score']
+            summary['score'] = summary['conservative_score']
+            summary['passes_mark'] = summary['score'] is not None and summary['score'] >= st['pass_score']
+            summary['matches'] = summary['passes_mark'] and summary['reliable'] and not summary['failed_essentials'] and not summary['unknown_essentials']
+    result['metric_notes'] = m['operating_returns']['note']
+    result['capex_sources'] = list(zip(rec['years'], m['capex_sources']))
+    result['share_evidence'] = m['share_evidence']
+    result['ttm_unavailable_reason'] = m['ttm_unavailable_reason']
+    result["valuation"] = valuation(m, rec, st, cycle_policy)
     issues = []
     today = config.now_ist().date()
     meta = rec.get("meta") or {}
@@ -559,7 +610,20 @@ def score_company(rec, st=None, size_rank=None, headroom=False):
     if not any(result[k]["reliable"] and not result[k]["unknown_essentials"] for k in ("buffett", "munger", "lynch")):
         issues.append("insufficient essential financial data")
     result["data_quality"] = {"issues": issues, "checked_at": today.isoformat()}
-    result["algorithm_version"] = "2.1"
+    if rec['sector_type'] == 'general' and (m['debt'] is None or m['cash'] is None or m['equity'][-1] is None or m['equity'][-1] <= 0):
+        issues.append('latest debt, cash or positive equity unavailable')
+    if any(not isinstance(v, (int,float)) or isinstance(v,bool) or not math.isfinite(v) or v <= 0 for v in (m['price'],m['market_cap'])):
+        issues.append('current price or market cap missing/invalid')
+    if qdates and len(qdates) >= 4 and m['ttm_unavailable_reason']:
+        issues.append('unsuitable quarterly earnings: '+m['ttm_unavailable_reason'])
+    result['model_status'] = 'production legacy policy' if model == 'legacy' else 'experimental comparison only'
+    result["algorithm_version"] = "2.2-safety" if model == 'legacy' else 'operating-cycle-score-v1'
+    result['inapplicable_metrics'] = ['industrial ROIC','industrial ROCE','industrial FCF'] if rec['sector_type'] != 'general' else []
+    financial_stale = any('annual financials' in issue for issue in issues)
+    for philosophy in ('buffett','munger','lynch'):
+        for criterion in result[philosophy]['criteria']:
+            criterion['freshness'] = 'stale' if financial_stale else 'within annual limit'
+
     matched = [k for k in ("buffett", "munger", "lynch") if result[k]["matches"]]
     result["matches"] = matched
     result["all_three"] = len(matched) == 3
@@ -584,6 +648,8 @@ def score_company(rec, st=None, size_rank=None, headroom=False):
         warnings.append(f"treated as cyclical because of its industry ({rec['industry']}); the history is too short to show a cycle, "
                         "so mid-cycle earnings are estimated from only a few years")
     result["industry"] = rec.get("industry")
+    if result['cycle_assessment']['legacy_omits_cycle_test']:
+        warnings.append('Industry suggests cyclical exposure, but legacy classification omits the mid-cycle test. See the sector-first experimental comparison.')
     result["warnings"] = warnings
     if headroom:
         result["headroom"] = None if issues or result['provisional'] else price_headroom(rec, st, size_rank)

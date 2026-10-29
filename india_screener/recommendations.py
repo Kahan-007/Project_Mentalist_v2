@@ -73,6 +73,25 @@ def assess(held, shortlisted, score, st=None):
     return s, why
 
 
+def compare(held, shortlisted, production, experimental, scenarios, st=None):
+    """Comparison only: never routes experimental labels into signal_state or delivery."""
+    active, why = assess(held, shortlisted, production, st)
+    issues = (experimental or {}).get('data_quality',{}).get('issues',[])
+    quality = bool((experimental or {}).get('matches'))
+    base = next((r for r in scenarios.get('scenarios',[]) if r['scenario']=='base'), None)
+    mos = base.get('margin_of_safety') if base else None
+    enough = bool(experimental) and not issues and not experimental.get('provisional') and mos is not None
+    attractive = mos is not None and mos >= .25
+    comparison = ('insufficient evidence' if not enough else 'holding review' if held and (not quality or not attractive)
+                  else 'hold candidate' if held else 'eligible purchase candidate' if quality and attractive else 'watch')
+    return {'production_signal':active, 'production_reason':why, 'experimental_assessment':comparison,
+            'business_quality_matches':(experimental or {}).get('matches',[]),
+            'valuation_attractive':attractive if mos is not None else None,
+            'eligible_purchase':bool(enough and quality and attractive and not held and shortlisted),
+            'entry_margin_of_safety':.25, 'policy_version':'comparison-entry-v1',
+            'note':'Experimental comparison uses a stated 25% entry discount and conservative scores. This is an unvalidated policy, not a live Buy/Sell model; it cannot trigger notifications.'}
+
+
 def _clean(x):
     """JSON-safe copy (NaN/inf become null) so every analysis snapshot can be stored and read back."""
     if isinstance(x, float):
@@ -144,6 +163,8 @@ def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st
     for it in items:
         sym = it['symbol']
         analysis, err = analyses.get(sym, (None, None))
+        if str((analysis or {}).get('model_status','')).startswith('experimental'):
+            raise ValueError('Experimental analysis cannot enter production signal delivery')
         signal_now, why = assess(it['held'], it['shortlisted'], None if err else analysis, st)
         rec = records.get(sym) if records is not None else fundamentals.load(sym)
         rank = (size_ranks or {}).get(sym)
@@ -152,6 +173,8 @@ def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st
         context = news_alerts.evidence(it, rec, st, indicative, rank, (analysis or {}).get('algorithm_version'))
         context['model'] = {'signal':signal_now, 'why':why,
                             'scores':{k:(analysis or {}).get(k, {}).get('score') for k in ('buffett', 'munger', 'lynch')}}
+        context['model']['criteria'] = {k+'.'+c['key']:c['score'] for k in ('buffett','munger','lynch')
+                                        for c in (analysis or {}).get(k,{}).get('criteria',[])}
         meta = context['price_snapshot']
         stamp = config.now_ist().isoformat()
         with dbm.connect() as db:
@@ -177,6 +200,9 @@ def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st
                  meta.get('price'), meta.get('price_date'), meta.get('price_source'),
                  sc('buffett'), sc('munger'), sc('lynch'), json.dumps((analysis or {}).get('matches', [])),
                  note, json.dumps(_clean(heads)), json.dumps(_clean(snapshot))))
+            from . import research
+            research.capture(it, rec, snapshot, st, db=db, signal=signal_now,
+                             origin='confirmed transition', benchmark=cfg['benchmark'])
             if old:
                 title, body = news_alerts.recommendation_text(it, analysis, why, prior, signal_now, context,
                                                             previous, heads, detail, cfg)
