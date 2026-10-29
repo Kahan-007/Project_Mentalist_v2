@@ -101,3 +101,8 @@ Open **Monitor & risk** at http://127.0.0.1:8766/#quality for source health, hea
 - The monitor archives the statements, settings, algorithm version and analysis it actually observes. Future 20/60/120/252-session stock returns, benchmark-relative returns and maximum drawdown use cached adjusted daily data. They are descriptive observations, exclude trading costs and are not a profitability-validated strategy. Newly created archives need time before outcomes can exist.
 
 See [LONG_TERM_UPGRADE.md](LONG_TERM_UPGRADE.md) for scope, definitions, known limits and validation.
+
+
+### Engineering review branch
+
+The reliability and valuation upgrade is documented in [Engineering upgrade](docs/ENGINEERING_UPGRADE.md), with a [file-by-file Argon audit](docs/ARGON_AUDIT.md). Experimental comparisons remain separate from the production recommendation policy. See the report for validation, migration limits and deferred work.
