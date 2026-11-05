@@ -140,6 +140,44 @@ async function refreshUnread() {
 }
 setInterval(refreshUnread, 60000);
 
+// ---- closing price refresh
+let priceRun, viewTouched = false, showNewCloses = false, closeCheck;
+const closeButton = $("#refresh-closes");
+for (const event of ["click", "input"]) main.addEventListener(event, () => { viewTouched = true; });
+async function pollCloses() {
+  clearTimeout(closeCheck);
+  const d = await api("/api/current-price-status").catch(() => null);
+  if (d) {
+    const day = d.session || d.nse_date;
+    const coverage = d.total ? " · " + d.current_count + "/" + d.total : "";
+    const saved = day ? "Closes " + day + coverage : "No close refresh recorded";
+    $("#close-status").textContent = d.running ? "Checking closes…" :
+      d.error ? "Close refresh failed · " + saved : saved;
+    $("#close-status").title = d.error || d.nse_error || "Latest completed session and companies with a close for that session";
+    closeButton.disabled = d.running;
+    if (!d.running && d.at && priceRun !== undefined && priceRun !== d.at) {
+      const view = (location.hash.slice(1) || "portfolio").split("/")[0];
+      if (["portfolio", "scores", "top250", "analyse"].includes(view)) {
+        if (viewTouched) showNewCloses = true;
+        else route();
+      }
+    }
+    if (!d.running) priceRun = d.at;
+    else if (priceRun === undefined) priceRun = d.at;
+    closeButton.textContent = showNewCloses ? "Show updated closes" : "Refresh closes";
+  }
+  closeCheck = setTimeout(pollCloses, d?.running ? 2000 : 10000);
+}
+closeButton.onclick = () => {
+  if (showNewCloses) { route(); return; }
+  closeButton.disabled = true;
+  guard(async () => {
+    try { await api("/api/refresh-current-prices", {}); }
+    finally { await pollCloses(); }
+  });
+};
+pollCloses();
+
 // ---- navigation
 const views = {pairs: pairsView, quality: monitorView, portfolio, analyse, top250, scores, alerts, ledger, notifications, settings, help};
 function go(view, arg) {
@@ -147,6 +185,9 @@ function go(view, arg) {
   if (location.hash.slice(1) !== h) location.hash = h; else route();
 }
 function route() {
+  viewTouched = false;
+  showNewCloses = false;
+  closeButton.textContent = "Refresh closes";
   let [view, arg] = (location.hash.slice(1) || "portfolio").split("/");
   if (!views[view]) view = "portfolio";
   document.querySelectorAll("nav button[data-view]").forEach(b =>
@@ -185,7 +226,7 @@ async function portfolio() {
   <section class="box scroll"><h3 style="margin-top:0">Holdings</h3>${open.length ? `
     <table><thead><tr><th class="l">Stock</th><th>Qty</th><th>Avg cost</th><th>Last close</th><th>Day</th><th>Invested</th><th>Value</th><th>Unrealised</th><th>Dividends</th></tr></thead>
     <tbody>${open.map(p => `<tr><td class="l"><button class="link" data-an="${esc(p.symbol)}">${esc(p.symbol)}</button></td>
-      <td>${p.quantity}</td><td>${inr(p.avg_cost)}</td><td>${p.price_error ? '<span class="loss" title="' + esc(p.price_error) + '">no price</span>' : srcSpan(inr(p.last_close), `Yahoo Finance daily close, ${p.close_date || ""}`)}</td>
+      <td>${p.quantity}</td><td>${inr(p.avg_cost)}</td><td>${p.price_error ? '<span class="loss" title="' + esc(p.price_error) + '">no price</span>' : srcSpan(inr(p.last_close), `${p.price_source || "Daily close"}, ${p.close_date || ""}`) + (p.close_date ? `<br><span class="muted">${esc(p.close_date)}</span>` : "")}</td>
       <td>${signed(p.day_change, pct)}</td><td>${inr(p.invested, 0)}</td><td>${inr(p.value, 0)}</td>
       <td>${signed(p.unrealised, x => inr(x, 0))} ${p.unrealised != null ? '<span class="muted">(' + (p.unrealised >= 0 ? "+" : "−") + pct(Math.abs(p.unrealised / p.invested)) + ')</span>' : ""}</td>
       <td>${inr(p.dividends, 0)}</td></tr>`).join("")}</tbody>
@@ -354,7 +395,8 @@ async function analyse(sym) {
   $("#res").innerHTML = `
   <section class="box"><div class="row" style="justify-content:space-between">
     <div><h3 style="margin:0">${esc(d.name)} <span class="muted">${esc(d.symbol)}</span></h3>
-    ${d.price ? `<div><span class="src" title="Yahoo Finance daily close for ${esc(d.price.date)} (chart and 52-week range). Valuations use: ${esc(src.price || "n/a")}">${inr(d.price.last)}</span> <span class="muted">close ${d.price.date} · 1y ${signed(d.price.change_1y, pct)} · 52w range ${inr(d.price.low_52w, 0)}–${inr(d.price.high_52w, 0)}</span></div>` :
+    ${d.latest_close ? `<div>${srcSpan(inr(d.latest_close.close), d.latest_close.source)} <span class="muted">close ${esc(d.latest_close.date)}</span></div>
+      ${d.price ? `<div class="muted">Yahoo chart through ${esc(d.price.date)} · 1y ${signed(d.price.change_1y, pct)} · 52w range ${inr(d.price.low_52w, 0)}–${inr(d.price.high_52w, 0)}</div>` : ""}` :
       `<div class="loss">Price unavailable: ${esc(d.price_error)}</div>`}
     ${d.position ? `<div>You hold ${d.position.quantity} at ${inr(d.position.avg_cost)} average</div>` : ""}</div>
     <div class="row">${d.shortlisted ? '<button class="btn ghost" id="unsl">Remove from shortlist</button>' : '<button class="btn" id="sl">Add to shortlist</button>'}
@@ -673,10 +715,11 @@ function renderT250() {
     two_of_three: '<span class="chip m">Two of three</span>', lynch_only: '<span class="chip y">Growth</span>',
     buffett_only: '<span class="chip b">Buffett</span>', munger_only: '<span class="chip m">Munger</span>'})[r.bucket] || "";
   $("#t250table").innerHTML = shown.length ? `<table><thead><tr>${th("symbol", "Company", "l")}${th("industry", "Industry / type", "l")}${th("years", "Data", "l")}
-    ${th("mcap", "Mkt cap (₹ cr)")}${th("pe", "P/E")}${th("roce", "ROCE")}${th("roic", "ROIC")}${th("buffett", "Buffett")}${th("munger", "Munger")}${th("lynch", "Lynch")}${th("default", "Bucket", "l")}</tr></thead>
+    <th>Close</th>${th("mcap", "Mkt cap (₹ cr)")}${th("pe", "P/E")}${th("roce", "ROCE")}${th("roic", "ROIC")}${th("buffett", "Buffett")}${th("munger", "Munger")}${th("lynch", "Lynch")}${th("default", "Bucket", "l")}</tr></thead>
     <tbody>${shown.map(r => `<tr class="${r.signal ? "sig-" + r.signal : ""}"><td class="l"><button class="link" data-an="${esc(r.symbol)}">${esc(r.symbol)}</button>${r.in_nifty ? "" : ' <span class="chip" title="Not in the Nifty LargeMidcap 250">mcap list</span>'}<br><span class="muted">${esc(r.name)}</span></td>
     <td class="l">${esc(r.industry)}<br><span class="muted">${esc(r.sector_type || r.suggested_type)}${r.category ? " · " + esc(r.category) : ""}${r.size ? " · " + esc(r.size) : ""}</span></td>
     <td class="l">${r.imported ? srcSpan(`${r.years} yrs`, r.src?.financials) + (r.provisional ? '<br><span class="st-warn">provisional</span>' : "") : '<span class="muted">not imported</span>'}</td>
+    <td>${r.price == null ? "–" : srcSpan(inr(r.price), r.close_source || r.src?.price) + `<br><span class="muted">${esc(r.price_date || "")}</span>`}</td>
     <td>${r.market_cap_cr ? srcSpan(Math.round(r.market_cap_cr).toLocaleString("en-IN"), r.src?.market_cap) : "–"}</td>
     <td>${r.pe ? srcSpan(r.pe.toFixed(1), r.src?.pe) : "–"}</td>
     <td>${retCell(r, "roce")}</td><td>${retCell(r, "roic")}</td>
@@ -764,10 +807,11 @@ async function scores() {
   const render = () => {
     const rows = d.rows.filter(r => !(r.error && !r.name && r.signal)).filter(r => !scoreSector || r.industry === scoreSector);
     $("#scount").textContent = `${rows.length} companies`;
-    $("#stable").innerHTML = rows.length ? `<table><thead><tr><th class="l">Stock</th><th class="l">Sector / type</th><th>ROCE</th><th>ROIC</th><th>Buffett</th><th>Munger</th><th>Lynch</th><th class="l">Matches</th><th class="l">Shortlist</th></tr></thead>
-    <tbody>${rows.map(r => r.error ? `<tr><td class="l">${esc(r.symbol)}</td><td class="l loss" colspan="8">${esc(r.error)}</td></tr>` :
+    $("#stable").innerHTML = rows.length ? `<table><thead><tr><th class="l">Stock</th><th class="l">Sector / type</th><th>Close</th><th>ROCE</th><th>ROIC</th><th>Buffett</th><th>Munger</th><th>Lynch</th><th class="l">Matches</th><th class="l">Shortlist</th></tr></thead>
+    <tbody>${rows.map(r => r.error ? `<tr><td class="l">${esc(r.symbol)}</td><td class="l loss" colspan="9">${esc(r.error)}</td></tr>` :
       `<tr class="${r.signal ? "sig-" + r.signal : ""}"><td class="l"><button class="link" data-an="${esc(r.symbol)}">${esc(r.symbol)}</button><br><span class="muted">${esc(r.name || "")}</span></td>
       <td class="l">${esc(r.industry || "")}<br><span class="muted">${esc(r.category)} · ${esc(r.size || "")} · ${esc(r.sector_type)}</span></td>
+      <td>${r.price == null ? "–" : srcSpan(inr(r.price), r.src?.price) + `<br><span class="muted">${esc(r.price_date || "")}</span>`}</td>
       <td>${retCell(r, "roce")}</td><td>${retCell(r, "roic")}</td>
       <td${tip(r.src?.scores)}>${cell(r.buffett)}</td><td${tip(r.src?.scores)}>${cell(r.munger)}</td><td${tip(r.src?.scores)}>${cell(r.lynch)}</td>
       <td class="l">${r.all_three ? '<span class="chip all">All three</span>' : [["buffett", "b", "Buffett"], ["munger", "m", "Munger"], ["lynch", "y", "Lynch"]]

@@ -17,12 +17,37 @@ import io
 import math
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
-from . import config, fundamentals, net, prices, storage, universe, workbook
+from . import config, fundamentals, index250, net, prices, storage, universe, workbook
 
 NSE_ARCHIVE = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
 MAX_ARCHIVE_MEMBER = 30_000_000
-STATUS_PATH = config.DATA / "current_price_status.json"
+_REFRESH_LOCK = Lock()
+
+
+def status():
+    return storage.read_json(config.DATA / "current_price_status.json") or {}
+
+
+def official_closes():
+    return storage.read_json(config.DATA / "nse_closes.json") or {}
+
+
+def saved_close(symbol, exchange, official=None):
+    """Closing price from the bulk update, when available for this exchange."""
+    if exchange.upper() != "NSE":
+        return None
+    meta = (fundamentals.load(symbol) or {}).get("meta", {})
+    source = meta.get("price_source") or ""
+    saved = None
+    if source.startswith(("NSE bhavcopy close", "Yahoo close")) and meta.get("price_date") and meta.get("price"):
+        saved = {"close": meta["price"], "date": meta["price_date"], "source": source.split(" x shares")[0]}
+    archived = (official or {}).get(symbol)
+    if archived and (not saved or archived["date"] > saved["date"]):
+        return archived
+    return saved
 
 
 def _key(value):
@@ -59,16 +84,17 @@ def _date(value):
 
 
 def parse_csv(data, expected_date):
-    """{symbol, price, date} rows for EQ-series stocks. Every row must carry the expected trade date."""
+    """Official equity closes. Prefer EQ when both EQ and BE are present."""
     reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
     headers = reader.fieldnames or []
     sym_col, px_col = _find(headers, SYMBOL_KEYS), _find(headers, PRICE_KEYS)
     ser_col, date_col = _find(headers, SERIES_KEYS), _find(headers, DATE_KEYS)
     if not (sym_col and px_col and ser_col and date_col):
         raise ValueError(f"unexpected bhavcopy columns: {headers[:12]}")
-    rows, seen = [], {}
+    seen = {}
     for raw in reader:
-        if str(raw.get(ser_col, "")).strip().upper() != "EQ":
+        series = str(raw.get(ser_col, "")).strip().upper()
+        if series not in ("EQ", "BE"):
             continue
         sym = str(raw.get(sym_col, "")).strip().upper()
         price = _number(raw.get(px_col))
@@ -77,13 +103,15 @@ def parse_csv(data, expected_date):
         day = _date(raw.get(date_col))
         if day != expected_date:
             raise ValueError(f"bhavcopy row for {sym} is dated {day}, expected {expected_date}")
-        if sym in seen:
-            if seen[sym] != price:
-                raise ValueError(f"conflicting duplicate prices for {sym}")
-            continue
-        seen[sym] = price
-        rows.append({"symbol": sym, "price": price, "date": day})
-    if len(rows) < 500:   # the real file has ~2,000 EQ rows; far fewer means a truncated/wrong file
+        row = {"symbol": sym, "price": price, "date": day, "series": series,
+               "isin": (raw.get("ISIN") or "").strip().upper()}
+        prior = seen.get(sym)
+        if prior and prior["series"] == series and prior != row:
+            raise ValueError(f"conflicting duplicate prices for {sym}")
+        if prior is None or series == "EQ":
+            seen[sym] = row
+    rows = list(seen.values())
+    if sum(r["series"] == "EQ" for r in rows) < 500:   # the real file has ~2,000 EQ rows; far fewer means a truncated/wrong file
         raise ValueError(f"only {len(rows)} EQ rows in bhavcopy; refusing to use it")
     return rows
 
@@ -102,9 +130,9 @@ def parse_zip(data, expected_date):
 
 
 def candidate_dates(now=None, days=10):
-    """Weekdays to try, newest first. Before 17:00 IST today's file isn't expected yet."""
+    """Weekdays to try, newest first. Before the end-of-day cutoff, skip today's file."""
     now = now or config.now_ist()
-    start = now.date() - dt.timedelta(days=1 if now.time() < dt.time(17, 0) else 0)
+    start = now.date() - dt.timedelta(days=1 if now.hour < config.EOD_READY_HOUR else 0)
     return [d for d in (start - dt.timedelta(days=i) for i in range(days)) if d.weekday() < 5]
 
 
@@ -118,51 +146,127 @@ def fetch_nse():
             return parse_zip(raw, day.isoformat()), url
         except (net.FetchError, ValueError, UnicodeError) as exc:
             last_error = exc   # a holiday has no file: try the day before
+            if isinstance(exc, net.FetchError) and "HTTP 404" not in str(exc) and "HTTP 403" not in str(exc):
+                break  # a network outage is not specific to one date
     raise ValueError(f"no usable NSE bhavcopy in the last 10 days: {last_error}")
 
 
-def apply(rows, source, symbols):
+def nse_by_symbol(rows):
     by = {r["symbol"]: r for r in rows}
+    ids = {r["symbol"]: r.get("isin") for r in workbook.mcap_universe()}
+    ids.update({sym: r.get("isin") for sym, r in index250.by_symbol().items()})
+    by_isin = {}
+    for row in rows:
+        if row.get("isin"):
+            by_isin.setdefault(row["isin"], []).append(row)
+    for sym, isin in ids.items():
+        row = by.get(sym)
+        if isin and (not row or row.get("isin") and row["isin"] != isin):
+            matches = by_isin.get(isin, [])
+            if len(matches) == 1:
+                by[sym] = matches[0]
+            else:
+                by.pop(sym, None)
+    return by
+
+
+def _source(row, symbol, source):
+    if row["symbol"] != symbol:
+        return f"{source} ({row['symbol']}, same ISIN)"
+    if row.get("series") == "BE":
+        return f"{source} (BE series)"
+    return source
+
+
+def apply(rows, source, symbols):
+    by = nse_by_symbol(rows)
     updated, stale, missing, no_shares = [], [], [], []
     for sym in symbols:
         row = by.get(sym)
         if not row:
             missing.append(sym)
             continue
-        res = workbook.update_current_price(sym, row["price"], row["date"], source=source)
+        res = workbook.update_current_price(sym, row["price"], row["date"], source=_source(row, sym, source),
+                                            keep_price_without_shares=True)
         (updated if res is True else stale if res == "stale" else no_shares).append(sym)
     return {"updated": updated, "stale_not_overwritten": stale, "missing": missing, "no_share_count": no_shares}
 
 
-def _yahoo_current(sym, cfg):
-    bars = prices.history(sym, cfg=cfg)
-    if not bars:
-        raise ValueError("no Yahoo bars")
-    return workbook.update_current_price(sym, bars[-1]["close"], bars[-1]["date"], source="Yahoo close")
+def _yahoo_current(sym, cfg, target):
+    bars = prices.history(sym, rng="5d", cfg=cfg)
+    if target and bars[-1]["date"] < target:
+        bars = prices.history(sym, rng="5d", force=True, cfg=cfg)
+    last = bars[-1]
+    if target and last["date"] < target:
+        raise ValueError(f"Yahoo has only {last['date']}; latest known session is {target}")
+    return workbook.update_current_price(sym, last["close"], last["date"], source="Yahoo close", keep_price_without_shares=True)
 
 
 def refresh(symbols=None, cfg=None, benchmark_date=None):
-    """NSE bulk first; Yahoo for anything NSE missed or when NSE's file lags the benchmark's last close."""
-    cfg = cfg or config.load_config()
-    symbols = sorted(symbols or fundamentals.all_symbols())
+    """Refresh closes and valuation inputs, serializing bulk refreshes in this process."""
+    with _REFRESH_LOCK:
+        return _refresh(symbols, cfg or config.load_config(), benchmark_date)
+
+
+def _refresh(symbols, cfg, benchmark_date):
+    symbols = sorted(fundamentals.all_symbols() if symbols is None else symbols)
+    previous = status()
     out = {"at": config.now_ist().isoformat(), "nse_date": None, "nse_error": None}
     try:
         rows, url = fetch_nse()
+        old_archive = official_closes()
+        old_day = max((row["date"] for row in old_archive.values()), default="")
+        if rows[0]["date"] >= old_day:
+            archive = {sym: {"close": row["price"], "date": row["date"],
+                        "source": _source(row, sym, "NSE bhavcopy close")}
+                       for sym, row in nse_by_symbol(rows).items()}
+            storage.write_json(config.DATA / "nse_closes.json", archive)
         out.update(nse_date=rows[0]["date"], nse_url=url, **apply(rows, "NSE bhavcopy close", symbols))
-        fallback = out["missing"]
-        if benchmark_date and rows[0]["date"] < benchmark_date:
-            out["nse_error"] = f"NSE file is for {rows[0]['date']} but Nifty already has a {benchmark_date} close"
-            fallback = symbols
     except Exception as exc:
         out.update(nse_error=f"{type(exc).__name__}: {exc}", updated=[], stale_not_overwritten=[],
                    missing=[], no_share_count=[])
+
+    # Check the benchmark only if the exchange archive might be lagging.
+    candidates = candidate_dates()
+    if not benchmark_date and (not out["nse_date"] or
+            (candidates and out["nse_date"] < candidates[0].isoformat())):
+        for key in ("benchmark", "benchmark_fallback"):
+            try:
+                benchmark_date = prices.history(cfg[key], rng="5d", force=True, cfg=cfg)[-1]["date"]
+                break
+            except (ValueError, net.FetchError, prices.DataError):
+                continue
+    target = max(filter(None, (out["nse_date"], benchmark_date, previous.get("session"), previous.get("nse_date"))),
+                 default=None)
+    fallback = out["missing"]
+    if out["nse_date"] != target or not out["nse_date"]:
+        if out["nse_date"] and target:
+            out["nse_error"] = f"NSE file is for {out['nse_date']} but Nifty or saved data has a {target} close"
         fallback = symbols
-    out["yahoo_updated"], out["yahoo_failed"] = [], {}
-    for sym in fallback:
+
+    def update(sym):
         try:
-            if _yahoo_current(sym, cfg) is True:
-                out["yahoo_updated"].append(sym)
+            saved = saved_close(sym, "NSE")
+            if target and saved and saved["date"] >= target:
+                return sym, "stale"
+            return sym, _yahoo_current(sym, cfg, target)
         except Exception as exc:
-            out["yahoo_failed"][sym] = str(exc)[:120]
-    storage.write_json(STATUS_PATH, out)
+            return sym, str(exc)[:120]
+
+    out["yahoo_updated"], out["yahoo_failed"] = [], {}
+    if fallback:
+        with ThreadPoolExecutor(max_workers=min(4, max(1, int(cfg["workers"])))) as pool:
+            for sym, result in pool.map(update, fallback):
+                if result is True:
+                    out["yahoo_updated"].append(sym)
+                elif result is False:
+                    if sym not in out["no_share_count"]:
+                        out["no_share_count"].append(sym)
+                elif result != "stale":
+                    out["yahoo_failed"][sym] = result
+    dates = [(saved_close(sym, "NSE") or {}).get("date") for sym in symbols]
+    out["session"] = max(filter(None, [target, *dates]), default=None)
+    out["total"] = len(symbols)
+    out["current_count"] = sum(day is not None and day == out["session"] for day in dates)
+    storage.write_json(config.DATA / "current_price_status.json", out)
     return out

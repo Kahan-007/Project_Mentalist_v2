@@ -262,7 +262,7 @@ def apply_latest_prices(text: str):
            "not_yet_imported": len(prices) - len(updated) - len(skipped)}
 
 
-def update_current_price(symbol, price, as_of, source="current-price snapshot"):
+def update_current_price(symbol, price, as_of, source="current-price snapshot", *, keep_price_without_shares=False):
     """Update only the current valuation price and market cap; year-end history is untouched.
     Returns True when updated, "stale" when the record already holds a newer price, False when the
     company has no share count to turn a price into a market cap."""
@@ -278,13 +278,14 @@ def update_current_price(symbol, price, as_of, source="current-price snapshot"):
     if str(rec.get("meta", {}).get("price_date") or rec.get("meta", {}).get("market_cap_date") or "")[:10] > day:
         return "stale"
     shares, _ = financial_math.current_shares(rec)
-    if not shares:
+    if not shares and not keep_price_without_shares:
         return False
     meta = rec.setdefault("meta", {})
-    meta.update(price=price, market_cap=price * shares, market_cap_date=day, price_date=day,
-                price_source=f"{source} x shares")
+    meta.update(price=price, market_cap=price * shares if shares else None,
+                market_cap_date=day if shares else None, price_date=day,
+                price_source=f"{source} x shares" if shares else source)
     storage.write_json(config.DATA / "fundamentals" / f"{symbol}.json", rec)
-    return True
+    return bool(shares)
 
 
 def fill_prices(symbol, bars):

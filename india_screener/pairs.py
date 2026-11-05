@@ -135,10 +135,11 @@ def inspect(key):
     bars = [prices.history(sym,rng='2y') for sym in (a,b)]
     fresh = all(prices.history_status(sym,rng='2y')['state']=='fresh' for sym in (a,b))
     result = analyze(*bars,config.now_ist().date(),fresh)
-    session = (storage.read_json(config.DATA/'current_price_status.json') or {}).get('nse_date')
+    close_status = storage.read_json(config.DATA/'current_price_status.json') or {}
+    session = close_status.get('session') or close_status.get('nse_date')
     if session and result['dates'][-1] < session:
         result["market_ok"] = False
-        result['reasons'].append(f"Latest common close precedes the saved NSE session {session}.")
+        result['reasons'].append(f"Latest common close precedes the latest known session {session}.")
         result['direction'] = None
     if result['direction']:
         cheap, rich = (a,b) if result['direction']=='A' else (b,a)

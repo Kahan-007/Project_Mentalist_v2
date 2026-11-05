@@ -203,7 +203,7 @@ def cmd_ledger(a):
 def cmd_refresh_current(a):
     from . import price_snapshot
     cfg = config.load_config()
-    r = price_snapshot.refresh(cfg=cfg, benchmark_date=prices.benchmark(cfg)[-1]["date"])
+    r = price_snapshot.refresh(cfg=cfg)
     print(f"NSE closing prices dated {r['nse_date'] or 'n/a'}: {len(r['updated'])} companies updated.")
     if r["nse_error"]:
         print(f"NSE problem: {r['nse_error']}")

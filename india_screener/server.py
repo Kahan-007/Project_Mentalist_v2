@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import (appnotify, autofill, config, daily, fundamentals, index250, news, notify, portfolio, presets, prices,
+from . import (appnotify, autofill, config, daily, fundamentals, index250, news, notify, portfolio, presets, price_snapshot, prices,
                recommendations, scoring, sources, shortlist, storage,
                tracker, universe, verify)
 
@@ -22,6 +22,48 @@ SYMBOL_RE = universe.SYMBOL_RE
 JOB = {"running": False, "started": None, "finished": None, "result": None, "error": None}
 NEWS_CACHE = {}
 LOCK = threading.Lock()
+PRICE_REFRESH_LOCK = threading.Lock()
+PRICE_REFRESH = {"running": False, "error": None}
+
+
+def _refresh_closes():
+    try:
+        price_snapshot.refresh()
+    except Exception as exc:
+        PRICE_REFRESH["error"] = str(exc)[:200]
+    finally:
+        with PRICE_REFRESH_LOCK:
+            PRICE_REFRESH["running"] = False
+
+
+def start_price_refresh():
+    with PRICE_REFRESH_LOCK:
+        if not PRICE_REFRESH["running"]:
+            PRICE_REFRESH.update(running=True, error=None)
+            threading.Thread(target=_refresh_closes, daemon=True, name="price-refresh").start()
+
+
+def _retry_closes(stop):
+    while not stop.wait(15 * 60):
+        now = config.now_ist()
+        if now.weekday() >= 5 or now.hour < config.EOD_READY_HOUR:
+            continue
+        saved = price_snapshot.status()
+        if (saved.get("nse_date") != now.date().isoformat() or
+                saved.get("current_count", 0) < saved.get("total", 0)):
+            start_price_refresh()
+
+
+def api_current_price_status(q, body):
+    with PRICE_REFRESH_LOCK:
+        saved = price_snapshot.status()
+        return {**PRICE_REFRESH, **{key: saved.get(key) for key in
+                ("at", "session", "nse_date", "nse_error", "current_count", "total")}}
+
+
+def api_refresh_current_prices(q, body):
+    start_price_refresh()
+    return api_current_price_status(q, body)
 
 
 def size_ranks():
@@ -64,15 +106,21 @@ def _dec(x):
 
 def _last_closes(symbols_exchanges):
     out = {}
+    official = price_snapshot.official_closes()
 
     def one(se):
         sym, ex = se
+        saved = price_snapshot.saved_close(sym, ex, official)
         try:
             b = prices.history(sym, ex)
-            return sym, {"close": b[-1]["close"], "date": b[-1]["date"],
-                         "prev": b[-2]["close"] if len(b) > 1 else None}
+            last = b[-1]
+            if saved and saved["date"] > last["date"]:
+                return sym, saved
+            close = saved if saved and saved["date"] == last["date"] else {
+                "close": last["close"], "date": last["date"], "source": "Yahoo close"}
+            return sym, {**close, "prev": b[-2]["close"] if len(b) > 1 else None}
         except Exception as exc:
-            return sym, {"error": str(exc)[:160]}
+            return sym, saved or {"error": str(exc)[:160]}
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         for sym, v in pool.map(one, symbols_exchanges):
@@ -96,7 +144,7 @@ def api_portfolio(q, body):
                      "day_change": (c["close"] / c["prev"] - 1) if c.get("close") and c.get("prev") else None,
                      "value": value, "unrealised": value - inv if value is not None else None,
                      "realised": _dec(p["realised"]), "dividends": _dec(p["dividends"]),
-                     "price_error": c.get("error")})
+                     "price_source": c.get("source"), "price_error": c.get("error")})
     txns = [{**t, "quantity": float(t["quantity"]), "price": float(t["price"]), "fees": float(t["fees"]),
              "amount": float(t["amount"])} for t in portfolio.transactions()]
     return {"positions": rows, "transactions": txns[::-1],
@@ -193,6 +241,12 @@ def api_stock(q, body):
                         "change_1y": closes[-1] / closes[-250] - 1 if len(closes) >= 250 else None}
     except Exception as exc:
         out["price_error"] = str(exc)[:200]
+    history = out.get("price")
+    saved = price_snapshot.saved_close(sym, exchange, price_snapshot.official_closes())
+    if saved and (not history or saved["date"] >= history["date"]):
+        out["latest_close"] = saved
+    elif history:
+        out["latest_close"] = {"close": history["last"], "date": history["date"], "source": "Yahoo close"}
     rec = fundamentals.load(sym)
     if rec:
         out["fundamentals"] = {"imported_at": rec["imported_at"], "basis": rec["basis"], "sector_type": rec["sector_type"],
@@ -347,12 +401,15 @@ def universe_rows(which="nifty"):
     sl = {s["symbol"] for s in shortlist.load().get("stocks", [])}
     held = set(portfolio.holdings())
     rows = []
+    official = price_snapshot.official_closes()
     for r in base_universe(which):
         rec = fundamentals.load(r["symbol"])
         row = {"symbol": r["symbol"], "name": r["name"], "industry": r["industry"], "suggested_type": r["suggested_type"],
                "in_nifty": r["in_nifty"], "mcap_rank": r["mcap_rank"],
                "imported": bool(rec), "shortlisted": r["symbol"] in sl, "held": r["symbol"] in held}
         if rec:
+            meta = rec.get("meta", {})
+            row.update(price=meta.get("price"), price_date=meta.get("price_date"))
             row.update(years=len(rec["years"]), last_year=rec["years"][-1], sector_type=rec["sector_type"],
                        imported_at=rec.get("imported_at", "")[:10],
                        source="workbook" if not (rec.get("quarters") or {}).get("dates") else "screener export",
@@ -373,6 +430,9 @@ def universe_rows(which="nifty"):
                 row["error"] = f"{type(exc).__name__}: {exc}"
         if "signal" not in row:
             row["signal"], row["signal_note"] = recommendations.assess(row["held"], row["shortlisted"], None, st, symbol=row["symbol"])
+        close = official.get(row["symbol"])
+        if close and close["date"] > (row.get("price_date") or ""):
+            row.update(price=close["close"], price_date=close["date"], close_source=close["source"])
         rows.append(row)
     return rows, st, ranks
 
@@ -829,13 +889,13 @@ def api_notify_test(q, body):
     return {"problems": notify.send("Screener test alert", "If you can see this, alerts work.")}
 
 
-GET = {"/api/portfolio": api_portfolio, "/api/universe": api_universe, "/api/stock": api_stock,
+GET = {"/api/current-price-status": api_current_price_status, "/api/portfolio": api_portfolio, "/api/universe": api_universe, "/api/stock": api_stock,
        "/api/scores": api_scores, "/api/shortlist": api_shortlist, "/api/events": api_events,
        "/api/recommendations": api_recommendations, "/api/presets": api_presets,
        "/api/notifications": api_notifications, "/api/unread": api_unread, "/api/fin-job": api_fin_job,
        "/api/settings": api_settings, "/api/top250": api_top250, "/api/verify-prices": api_verify_prices,
        "/api/price-job": api_price_job}
-POST = {"/api/presets": api_presets_action, "/api/notifications/read": api_notifications_read,
+POST = {"/api/refresh-current-prices": api_refresh_current_prices, "/api/presets": api_presets_action, "/api/notifications/read": api_notifications_read,
         "/api/refresh-financials": api_refresh_financials, "/api/txn": api_txn, "/api/txn/delete": api_txn_delete, "/api/txn/correct": api_txn_correct, "/api/import/zerodha": api_import_zerodha,
         "/api/import/financials": api_import_financials, "/api/manual": api_manual,
         "/api/shortlist/add": api_shortlist_add, "/api/shortlist/remove": api_shortlist_remove,
@@ -1023,6 +1083,9 @@ def serve(port=8765, open_browser=True):
         raise SystemExit(f"Port {port} is busy ({exc}). Is the screener already running? Try --port {port + 1}.")
     url = f"http://127.0.0.1:{port}/"
     print(f"Screener running at {url}  (close this window or press Ctrl+C to stop)", flush=True)
+    stop_price_retry = threading.Event()
+    start_price_refresh()
+    threading.Thread(target=_retry_closes, args=(stop_price_retry,), daemon=True, name="price-retry").start()
     from . import monitor
     if config.load_config()['monitor']['enabled']:
         monitor.start()
@@ -1033,5 +1096,6 @@ def serve(port=8765, open_browser=True):
     except KeyboardInterrupt:
         pass
     finally:
+        stop_price_retry.set()
         monitor.STOP.set()
         httpd.server_close()

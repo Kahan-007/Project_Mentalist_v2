@@ -13,7 +13,7 @@ from tests import fixtures_fund as fx
 
 def udiff_zip(day="2026-09-24", count=600, infy=1234.5):
     rows = ["TradDt,ISIN,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric"]
-    rows.append(f"{day},INE000000001,INFY,EQ,1,1,1,{infy}")
+    rows.append(f"{day},INE009A01021,INFY,EQ,1,1,1,{infy}")
     rows.append(f"{day},INE000000002,INFY,BE,1,1,1,999")        # non-EQ series must be ignored
     rows += [f"{day},INE{i:09d},X{i:04d},EQ,1,1,1,{100 + i / 10:.2f}" for i in range(3, count + 2)]
     out = io.BytesIO()
@@ -30,18 +30,24 @@ class PriceSnapshot(unittest.TestCase):
         patches = [mock.patch.object(config, k, v) for k, v in {
             "ROOT": root, "DATA": root, "CACHE": root / "cache", "REPORTS": root / "reports", "LOGS": root / "logs",
             "CONFIG_PATH": root / "config.json"}.items()]
-        patches += [mock.patch.object(price_snapshot, "STATUS_PATH", root / "status.json"),
-                    mock.patch.object(config, "now_ist", return_value=dt.datetime(2026, 9, 25, 19, 0, tzinfo=config.IST))]
+        patches += [mock.patch.object(config, "now_ist", return_value=dt.datetime(2026, 9, 25, 19, 0, tzinfo=config.IST))]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
         config.ensure_dirs()
         fundamentals.save("INFY", fundamentals.parse_grid(fx.to_grid(fx.quality_company())), "consolidated", "general", "t.csv")
 
-    def test_parse_keeps_eq_only(self):
+    def test_parse_prefers_eq_over_be(self):
         rows = price_snapshot.parse_zip(udiff_zip(), "2026-09-24")
         infy = [r for r in rows if r["symbol"] == "INFY"]
-        self.assertEqual(infy, [{"symbol": "INFY", "price": 1234.5, "date": "2026-09-24"}])
+        self.assertEqual(infy, [{"symbol": "INFY", "price": 1234.5, "date": "2026-09-24", "series": "EQ", "isin": "INE009A01021"}])
+
+    def test_matches_renamed_stock_by_unique_isin(self):
+        row = {"symbol": "INFYNEW", "price": 1250, "date": "2026-09-25", "isin": "INE009A01021"}
+        with mock.patch.object(price_snapshot.index250, "by_symbol", return_value={"INFY": {"isin": row["isin"]}}):
+            self.assertEqual(price_snapshot.apply([row], "NSE bhavcopy close", ["INFY"])["updated"], ["INFY"])
+        self.assertEqual(price_snapshot.saved_close("INFY", "NSE")["close"], 1250)
+        self.assertIn("same ISIN", price_snapshot.saved_close("INFY", "NSE")["source"])
 
     def test_rejects_small_or_misdated_file(self):
         with self.assertRaisesRegex(ValueError, "EQ rows"):
@@ -78,6 +84,27 @@ class PriceSnapshot(unittest.TestCase):
         self.assertTrue(r["nse_error"])
         self.assertEqual(r["yahoo_updated"], ["INFY"])
         self.assertEqual(fundamentals.load("INFY")["meta"]["price"], 1500.0)
+
+    def test_stale_yahoo_cache_does_not_count_as_current(self):
+        older = [{"date": "2026-09-24", "close": 1500.0}]
+        with mock.patch.object(price_snapshot, "fetch_nse", return_value=(
+                [{"symbol": "INFY", "date": "2026-09-24", "price": 1400.0}], "archive")), \
+             mock.patch.object(price_snapshot.prices, "history", return_value=older) as history:
+            result = price_snapshot.refresh(["INFY"], benchmark_date="2026-09-25")
+        self.assertEqual(result["current_count"], 0)
+        self.assertIn("INFY", result["yahoo_failed"])
+        self.assertTrue(history.call_args.kwargs["force"])
+        self.assertEqual(price_snapshot.status()["session"], "2026-09-25")
+        self.assertEqual(fundamentals.load("INFY")["meta"]["price"], 1400)
+
+    def test_close_is_retained_without_share_count(self):
+        rows = [{"symbol": "INFY", "date": "2026-09-25", "price": 1500.0}]
+        with mock.patch.object(price_snapshot, "fetch_nse", return_value=(rows, "archive")), \
+             mock.patch.object(workbook.financial_math, "current_shares", return_value=(None, None)):
+            result = price_snapshot.refresh(["INFY"])
+        self.assertEqual(result["current_count"], 1)
+        self.assertEqual(result["no_share_count"], ["INFY"])
+        self.assertIsNone(fundamentals.load("INFY")["meta"]["market_cap"])
 
     def test_nse_lagging_benchmark_uses_yahoo(self):
         bars = [{"date": "2026-09-25", "close": 1500.0}]
