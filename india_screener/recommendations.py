@@ -33,7 +33,29 @@ def signal(held, shortlisted, matches, overvalued=False):
     return None
 
 
-def assess(held, shortlisted, score, st=None):
+def assess(held, shortlisted, score, st=None, symbol=None):
+    symbol = symbol or (score or {}).get('symbol')
+    if held and symbol:
+        lots = portfolio.holdings().get(symbol, {}).get('lots', [])
+        if any(lot.get('strategy') in ('pairs','value') for lot in lots):
+            from . import pairs
+            outcomes = []
+            for strategy,key in dict.fromkeys((lot.get('strategy'),lot.get('pair')) for lot in lots):
+                quantity = sum(lot['qty'] for lot in lots if (lot.get('strategy'),lot.get('pair')) == (strategy,key))
+                status, why = (pairs.long_position(key, symbol) if key else
+                               value_assess(held, shortlisted, score, st))
+                if strategy == 'value' and status == 'hold':
+                    multiple = score['valuation']['multiple']
+                    if multiple >= 1:
+                        status, why = 'sell', f'model fair value reached (price/value {multiple:.3f})'
+                outcomes.append((status,f"{quantity} shares ({key or strategy}): {status} — {why}"))
+            statuses = {s for s,_ in outcomes}
+            return (outcomes[0][0] if len(statuses)==1 else 'review',
+                    'Purchase strategy · ' + ' | '.join(w for _,w in outcomes))
+    return value_assess(held, shortlisted, score, st)
+
+
+def value_assess(held, shortlisted, score, st=None):
     """(signal, reason) using the scores plus the price-discipline setting."""
     from . import scoring
     st = st or scoring.settings()
@@ -165,12 +187,14 @@ def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st
         analysis, err = analyses.get(sym, (None, None))
         if str((analysis or {}).get('model_status','')).startswith('experimental'):
             raise ValueError('Experimental analysis cannot enter production signal delivery')
-        signal_now, why = assess(it['held'], it['shortlisted'], None if err else analysis, st)
+        signal_now, why = assess(it['held'], it['shortlisted'], None if err else analysis, st, symbol=sym)
         rec = records.get(sym) if records is not None else fundamentals.load(sym)
         rank = (size_ranks or {}).get(sym)
         if rank is None and (analysis or {}).get('size_basis') == 'rank':
             rank = {'large':1, 'mid':101, 'small':251}.get(analysis.get('size'))
         context = news_alerts.evidence(it, rec, st, indicative, rank, (analysis or {}).get('algorithm_version'))
+        if why.startswith('Purchase strategy'):
+            context['strategy_basis'] = why
         context['model'] = {'signal':signal_now, 'why':why,
                             'scores':{k:(analysis or {}).get(k, {}).get('score') for k in ('buffett', 'munger', 'lynch')}}
         context['model']['criteria'] = {k+'.'+c['key']:c['score'] for k in ('buffett','munger','lynch')
@@ -191,6 +215,8 @@ def log_signal_changes(items, analyses, publish=True, cfg=None, records=None, st
             heads = news_alerts.related_headlines(db, sym, context, cfg) if old else []
             detail = news_alerts.transition_detail(it, rec, analysis, st, previous, context, prior, signal_now,
                                                   rank) if old else {}
+            if why.startswith('Purchase strategy'):
+                detail = {'cause':'purchase strategy evaluated at paired closing prices','threshold_price':None}
             snapshot = {**(analysis or {}), 'settings_snapshot': st, 'analysis_error': err,
                         'alert_evidence':context, 'transition':detail, 'alert_policy':news_alerts.settings(cfg)}
             cur = db.execute(

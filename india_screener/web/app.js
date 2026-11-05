@@ -141,7 +141,7 @@ async function refreshUnread() {
 setInterval(refreshUnread, 60000);
 
 // ---- navigation
-const views = {quality: monitorView, portfolio, analyse, top250, scores, alerts, ledger, notifications, settings, help};
+const views = {pairs: pairsView, quality: monitorView, portfolio, analyse, top250, scores, alerts, ledger, notifications, settings, help};
 function go(view, arg) {
   const h = view + (arg ? "/" + arg : "");
   if (location.hash.slice(1) !== h) location.hash = h; else route();
@@ -168,6 +168,8 @@ async function portfolio() {
     <form class="row" id="txn"><input name="id" type="hidden">
       <label>Stock<input name="symbol" list="stocklist" placeholder="Type a name or symbol" required size="18" autocomplete="off"></label>
       <label>Type<select name="kind"><option>BUY</option><option>SELL</option><option>DIVIDEND</option><option>SPLIT</option><option>BONUS</option></select></label>
+      <label class="f-purpose">Purchase strategy<select name="strategy" required><option value="">Choose before buying</option><option value="value">Short-term value investing</option><option value="pairs">Statistical arbitrage</option></select></label>
+      <label class="f-pair" hidden>Paired stocks<select name="pair"></select></label>
       <label>Date<input name="date" type="date" value="${today()}" required></label>
       <label class="f-trade">Quantity<input name="quantity" type="number" min="1" step="1"></label>
       <label class="f-trade">Price per share (₹)<input name="price" type="number" min="0" step="0.01"></label>
@@ -195,14 +197,24 @@ async function portfolio() {
     <table><thead><tr><th class="l">Date</th><th class="l">Stock</th><th class="l">Type</th><th>Qty</th><th>Price</th><th>Charges</th><th>Detail</th><th></th></tr></thead>
     <tbody>${d.transactions.map(t => `<tr><td class="l">${t.trade_date}</td><td class="l">${esc(t.symbol)}</td><td class="l">${t.kind}</td>
     <td>${t.quantity || ""}</td><td>${t.price ? inr(t.price) : ""}</td><td>${t.fees ? inr(t.fees) : ""}</td>
-    <td>${t.kind === "DIVIDEND" ? inr(t.amount) : t.ratio_num ? t.ratio_num + ":" + t.ratio_den + (t.amount ? " · cash " + inr(t.amount) : "") : esc(t.note)}</td>
+    <td>${t.kind === "DIVIDEND" ? inr(t.amount) : t.ratio_num ? t.ratio_num + ":" + t.ratio_den + (t.amount ? " · cash " + inr(t.amount) : "") : esc([t.strategy==="pairs"?t.pair:t.strategy==="value"?"Short-term value":"",t.note].filter(Boolean).join(" · "))}</td>
     <td><button class="link" data-edit="${t.id}">Correct</button> <button class="link" data-del="${t.id}">Delete</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">None yet.</p>'}
   </section>`;
   const f = $("#txn");
+  const catalog = (await api("/api/pairs")).catalog;
+  function pairOptions() {
+    const current=f.pair.value, stock=symOf(f.symbol.value), keys=Object.keys(catalog).filter(key=>catalog[key].slice(0,2).includes(stock));
+    f.pair.innerHTML='<option value="">Choose a peer pair</option>'+keys.map(key=>'<option>'+esc(key)+'</option>').join('');
+    if(keys.includes(current)) f.pair.value=current;
+  }
   const toggle = () => { const k = f.kind.value;
+    f.strategy.disabled=k!=="BUY"; f.strategy.required=!f.strategy.disabled;
+    $(".f-purpose",f).hidden=f.strategy.disabled;
+    f.pair.disabled=f.strategy.disabled || f.strategy.value!=="pairs";
+    $(".f-pair",f).hidden=f.pair.disabled; f.pair.required=!f.pair.disabled; pairOptions();
     f.querySelectorAll(".f-trade").forEach(x => x.hidden = !["BUY", "SELL"].includes(k));
     $(".f-div", f).hidden = !["DIVIDEND", "SPLIT", "BONUS"].includes(k); $(".f-ratio", f).hidden = !["SPLIT", "BONUS"].includes(k); };
-  f.kind.onchange = toggle;
+  f.kind.onchange = toggle; f.strategy.onchange=toggle; f.symbol.oninput=pairOptions; toggle();
   f.onsubmit = e => { e.preventDefault(); guard(async () => {
     const b = Object.fromEntries(new FormData(f)); b.symbol = symOf(b.symbol);
     if (!["BUY","SELL"].includes(b.kind)) { delete b.quantity; delete b.price; delete b.fees; }
@@ -214,14 +226,23 @@ async function portfolio() {
     } else { delete b.id; await api("/api/txn", b); }
     status(`Saved ${b.kind} ${b.symbol}`); portfolio(); }); };
   $("#tb").onchange = e => guard(async () => { const file = e.target.files[0]; if (!file) return;
-    const r = await api("/api/import/zerodha", await file.text(), true);
+    const csv=await file.text(), purchases=await api('/api/import/zerodha?preview=1',csv,true), purposes={};
+    for(const [id,t] of Object.entries(purchases)){
+      const options=Object.keys(catalog).filter(key=>catalog[key].slice(0,2).includes(t.symbol));
+      const choice=prompt(t.date+' · '+t.quantity+' shares of '+t.symbol+' · '+id+'\nEnter “value” for short-term value, or enter a pair: '+options.join(', '));
+      if(choice===null) return;
+      const key=choice.trim().toUpperCase();
+      if(key!=='VALUE' && !options.includes(key)) throw Error('Unrecognized purchase strategy. Import cancelled.');
+      purposes[id]=key==='VALUE'?{strategy:'value'}:{strategy:'pairs',pair:key};
+    }
+    const r = await api('/api/import/zerodha?classified=1',{csv,purposes});
     status(`Imported ${r.added} trades, skipped ${r.skipped} (duplicates or non-equity)`); portfolio(); });
   main.querySelectorAll('[data-edit]').forEach(button => button.onclick = () => {
     const transaction = d.transactions.find(t=>t.id===Number(button.dataset.edit));
     for (const name of ['id','symbol','kind','quantity','price','fees','amount','exchange']) f.elements[name].value = transaction[name];
     f.elements.date.value = transaction.trade_date;
     f.elements.ratio.value = transaction.ratio_num ? `${transaction.ratio_num}:${transaction.ratio_den}` : '';
-    toggle(); f.scrollIntoView({behavior:'smooth'});
+    f.strategy.value=transaction.strategy || (transaction.kind==="BUY"?"value":""); toggle(); f.pair.value=transaction.pair || ""; f.scrollIntoView({behavior:'smooth'});
     status('Correct the transaction above. The entire ledger will be validated before saving.');
   });
   main.querySelectorAll("[data-del]").forEach(b => b.onclick = () => confirm("Delete this transaction?") &&
@@ -732,8 +753,8 @@ async function scores() {
     : '<p class="muted">Nothing shortlisted or held yet. Shortlist stocks below or on the Top 250 page, or record purchases on My portfolio.</p>'}
   <p class="muted" style="font-size:.867rem">A signal is a prompt to look closer, not an instruction: it uses the last saved price and imported financials.
   The monitor separately checks indicative quotes; confirmed Buy/Sell changes appear in Telegram and the recommendation log with their own price timestamps. Settings → News alert filter controls pushes.</p></section>
-  <h3>All imported companies</h3>
-  <p class="lead">Ranked by how many philosophies each matches (pass mark ${d.pass_score}%), then total score.
+  <h3>All imported companies · research ranking</h3>
+  <p class="lead">This is the full universe, including companies without a Buy signal. Ranked by how many philosophies each matches (pass mark ${d.pass_score}%), then total score.
   Where some data was missing, the share of the test that ran is shown underneath.</p>
   <div class="row" style="margin-bottom:12px"><button class="btn" id="all3">Shortlist every stock matching all three</button>
     <label style="flex-direction:row;align-items:center;gap:.4rem;margin-left:.6rem">Sector<select id="ssector"><option value="">All sectors</option>
@@ -1109,3 +1130,87 @@ async function notifications() {
 route();
 pollJob();
 refreshUnread();
+
+function pairChart(lines, dates, title, levels = []) {
+  const values = [...lines.flatMap(line => line.values), ...levels];
+  const lo = Math.min(...values), hi = Math.max(...values), span = hi-lo || 1;
+  const x = i => 74 + 628*i/(dates.length-1);
+  const y = v => 146 - 126*(v-lo)/span;
+  const fmt = v => v.toLocaleString(undefined,{maximumFractionDigits:4});
+  const guides = levels.map(v => `<path d="M74 ${y(v)}h628" stroke="currentColor" stroke-dasharray="4 4" opacity=".45"/>`).join("");
+  const traces = lines.map(line => `<polyline fill="none" stroke="${line.color}" stroke-width="2" points="${line.values.map((v,i)=>x(i).toFixed(2)+","+y(v).toFixed(2)).join(" ")}"/>`).join("");
+  return `<section class="box"><h3>${esc(title)}</h3><p>${lines.map(l=>`<b style="color:${l.color}">━</b> ${esc(l.name)}`).join("　")}</p>
+    <svg viewBox="0 0 725 175" width="100%" role="img" aria-label="${esc(title)}">
+    <g fill="currentColor" font-size="12"><text x="4" y="25">${fmt(hi)}</text><text x="4" y="146">${fmt(lo)}</text>
+    <text x="74" y="169">${dates[0]}</text><text x="702" text-anchor="end" y="169">${dates.at(-1)}</text></g>${guides}${traces}</svg></section>`;
+}
+
+async function pairsView() {
+  const page = document.createElement("div");
+  main.replaceChildren(page);
+  try {
+    const data = await api("/api/pairs");
+    const keys = Object.keys(data.catalog);
+    page.innerHTML = `<h2>Statistical arbitrage in pairs</h2><section class="box"><label>Economic peers
+      <select>${keys.map(k=>`<option value="${esc(k)}">${esc(k)} · ${esc(data.catalog[k][2])}</option>`).join("")}</select></label>
+      <label><input type="checkbox"> Alert me to qualifying pair entries through my configured channels</label></section><div class="pair-result"></div>`;
+    const select=page.querySelector("select"), watch=page.querySelector("input"), result=page.querySelector(".pair-result");
+    const panel=document.createElement('section');
+    panel.className='box'; page.insertBefore(panel,result);
+    panel.innerHTML='<h3>Compare pair scores</h3><div class="row"><label>Find stocks or industry<input class="find"></label><label>Show<select class="scope"><option>All</option><option>Entry candidates</option><option>Watched</option></select></label><button class="btn">Scan and rank pairs</button></div><p class="muted">Score is the five-session modelled log-spread move per gross exposure, in basis points before costs. Rank compares eligible entries by magnitude.</p><div class="ranking"></div>';
+    const reports=new Map(), ranking=panel.querySelector('.ranking'), scan=panel.querySelector('button');
+    function renderRanking(){
+      const query=panel.querySelector('.find').value.toLowerCase(), mode=panel.querySelector('.scope').value;
+      const visible=keys.filter(k=>(k+' '+data.catalog[k][2]).toLowerCase().includes(query)
+        && (mode!=='Watched'||data.watched.includes(k)) && (mode!=='Entry candidates'||reports.get(k)?.direction));
+      visible.sort((a,b)=>Number(!!reports.get(b)?.direction)-Number(!!reports.get(a)?.direction)
+        || Math.abs(reports.get(b)?.edge_bps||0)-Math.abs(reports.get(a)?.edge_bps||0));
+      ranking.innerHTML=visible.length?visible.map(k=>{
+        const r=reports.get(k);
+        return '<div><button class="link" data-key="'+esc(k)+'">'+esc(k)+'</button> · '+(r?.direction?
+          esc('Buy review '+r.cheap+' / sell review '+r.rich+' · '+Math.abs(r.edge_bps).toFixed(1)+' bp'):
+          esc(r?.error || (r?'No qualifying entry':'Awaiting scan')))+'</div>';
+      }).join(''):'No matching pairs in the scanned results.';
+      ranking.querySelectorAll('button').forEach(btn=>btn.onclick=()=>{select.value=btn.dataset.key;select.onchange();});
+    }
+    panel.oninput=renderRanking;
+    scan.onclick=async()=>{scan.disabled=true;
+      for(const [i,key] of keys.entries()){
+        if(!page.isConnected) return;
+        scan.textContent='Scanning '+(i+1)+' / '+keys.length;
+        try{reports.set(key,await api('/api/pairs?pair='+encodeURIComponent(key)));}
+        catch(e){reports.set(key,{error:e.message});}
+        renderRanking();
+      }
+      scan.disabled=false;scan.textContent='Refresh pair scores';
+    };
+    renderRanking();
+    watch.onchange=async()=>{
+      const key=select.value, enabled=watch.checked;
+      watch.disabled=true; select.disabled=true;
+      try {
+        await api("/api/pair-watch",{key,enabled});
+        data.watched=data.watched.filter(k=>k!==key);
+        if(enabled) data.watched.push(key);
+      } catch(e){watch.checked=!enabled; status(e.message,true);}
+      finally {watch.disabled=false;select.disabled=false;}
+    };
+    select.onchange=async()=>{
+      const key=select.value, [a,b]=data.catalog[key];
+      watch.checked=data.watched.includes(key);
+      result.textContent="Loading completed trading sessions…";
+      try {
+        const r=await api("/api/pairs?pair="+encodeURIComponent(key));
+        reports.set(key,r);renderRanking();if(select.value!==key) return;
+        const msg=r.direction ? `Buy review ${r.cheap} / sell review ${r.rich} as a pair` :
+          r.reasons.join(" ") || (Math.abs(r.z)<=0.5 ? "Spread near its recent mean." : "Within the entry threshold.");
+        result.innerHTML=`<section class="box"><h3>${esc(msg)}</h3><p>Close ${esc(r.dates.at(-1))} · z ${r.z.toFixed(3)} · hedge β ${r.beta.toFixed(3)}
+        · 5-session signed score ${r.edge_bps==null?"unavailable":r.edge_bps.toFixed(1)+" bp"} · residual test ${r.t.toFixed(3)} (5% cutoff ${r.critical.toFixed(3)}) · half-life ${r.half==null?"unavailable":r.half.toFixed(1)+" sessions"}</p></section>`
+        +pairChart([{name:a,values:r.first,color:"#3182ce"},{name:b,values:r.second,color:"#d97706"}],r.dates,"Adjusted prices · both start at 100")
+        +pairChart([{name:"Log spread",values:r.spread,color:"#8b5cf6"}],r.dates,"Gap after adjusting for the hedge ratio",[r.mean-2*r.sd,r.mean,r.mean+2*r.sd])
+        +`<p>The dashed lines show the previous ${r.window} observations’ mean and ±2 standard deviations. The fit uses ${r.dates.length-1} common closes before the latest point. Earlier chart points describe this fit. The entry band is 2 ≤ |z| &lt; 3.5. The 5% test applies per pair and assumes both log prices have a unit root. Costs, borrowing and execution are excluded.</p>`;
+      } catch(e){if(select.value===key) result.textContent=e.message;}
+    };
+    await select.onchange();
+  } catch(e){page.textContent=e.message;}
+}

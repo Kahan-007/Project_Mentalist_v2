@@ -74,12 +74,24 @@ def cmd_shortlist(a):
         print(" ", s["symbol"], s.get("exchange", "NSE"), s.get("aliases", ""), s.get("scores", ""))
 
 
+def purchase_choice(symbol, strategy=None, pair=None):
+    from .pairs import CATALOG
+    if strategy is None:
+        if not sys.stdin.isatty():
+            raise ValueError("Specify --strategy value or --strategy pairs --pair FIRST/SECOND")
+        strategy = input(f"{symbol} purchase purpose (value/pairs): ").strip().lower()
+    if strategy == 'pairs' and not pair and sys.stdin.isatty():
+        pair = input("Choose " + ", ".join(k for k,v in CATALOG.items() if symbol.upper() in v[:2]) + ": ").strip().upper()
+    return {'strategy':strategy,'pair':pair}
+
+
 def cmd_portfolio(a):
     if a.action == "add":
         if not a.kind or not a.symbol:
             raise ValueError("usage: portfolio add KIND SYMBOL --date YYYY-MM-DD ...")
+        choice = purchase_choice(a.symbol,a.strategy,a.pair) if a.kind.upper()=='BUY' else {}
         tid = portfolio.add(a.kind, a.symbol, a.date or config.now_ist().date().isoformat(), quantity=a.qty, price=a.price, fees=a.fees,
-                            amount=a.amount, ratio=a.ratio, exchange=a.exchange, note=a.note)
+                            amount=a.amount, ratio=a.ratio, exchange=a.exchange, note=a.note, **choice)
         print(f"Added transaction #{tid}")
         if a.kind.upper() in ("BUY", "SELL"):
             from . import recommendations
@@ -89,7 +101,10 @@ def cmd_portfolio(a):
         if not a.file:
             raise ValueError("pass --file path\\to\\tradebook.csv")
         from . import server
-        print(server.api_import_zerodha({}, Path(a.file).read_bytes()))
+        csv_data = Path(a.file).read_bytes()
+        preview = server.api_import_zerodha({'preview':['1']},csv_data)
+        purposes = {k:purchase_choice(v['symbol'],a.strategy,a.pair) for k,v in preview.items()}
+        print(server.api_import_zerodha({'classified':['1']},json.dumps({'csv':csv_data.decode('utf-8-sig'),'purposes':purposes}).encode()))
     elif a.action == "delete":
         print(f"Deleted {portfolio.delete(a.id)} transaction(s)")
     elif a.action == "txns":
@@ -249,6 +264,7 @@ def main(argv=None):
     s.add_argument("--date"); s.add_argument("--qty", default="0"); s.add_argument("--price", default="0")
     s.add_argument("--fees", default="0"); s.add_argument("--amount", default="0"); s.add_argument("--ratio")
     s.add_argument("--exchange", default="NSE"); s.add_argument("--note", default="")
+    s.add_argument("--strategy", choices=["value","pairs"]); s.add_argument("--pair")
     s.add_argument("--file"); s.add_argument("--id", type=int); s.set_defaults(fn=cmd_portfolio)
     s = sub.add_parser("import-folder", help="import every Screener export in a folder (matched by company name)")
     s.add_argument("folder"); s.add_argument("--basis", default="consolidated", choices=["consolidated", "standalone"])

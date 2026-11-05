@@ -126,5 +126,5 @@ class Integrity(unittest.TestCase):
             with dbm.connect(self.db) as db:
                 for name,rows in before.items():
                     self.assertEqual([tuple(r) for r in db.execute('SELECT * FROM '+name)],rows,name)
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],2)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],dbm.SCHEMA_VERSION)
                 self.assertEqual(db.execute('SELECT count(*) FROM research_context').fetchone()[0],0)

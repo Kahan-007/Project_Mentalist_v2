@@ -196,6 +196,8 @@ def transition_detail(item, record, analysis, st, previous, context, prior, curr
     if (not record or not previous.get('input_fingerprint') or
             previous['input_fingerprint'] != context.get('input_fingerprint')):
         return result
+    if (context.get('strategy_basis') or previous.get('strategy_basis')):
+        return {'cause':'purchase strategy or its inputs changed','threshold_price':None}
     if not all(isinstance(p, (int, float)) and math.isfinite(p) and p > 0 for p in (old_price, price)) or old_price == price:
         result['cause'] = 'model status changed; price crossing unconfirmed'
         return result
@@ -222,7 +224,7 @@ def transition_detail(item, record, analysis, st, previous, context, prior, curr
 def recommendation_text(item, analysis, why, prior, current, context, previous, heads, detail, cfg):
     meta = context.get('price_snapshot', {})
     price = meta.get('price')
-    lines = [f"Model: {prior.upper()} → {current.upper()}",
+    lines = ["Logic: purchase-purpose rules for the open FIFO lots. See each lot decision below." if why.startswith("Purchase strategy") else "Logic: Buffett / Munger / Lynch fundamental screen and valuation discipline.", f"Model: {prior.upper()} → {current.upper()}",
              'You hold this stock.' if item['held'] else 'On your shortlist; no recorded holding.']
     if isinstance(price, (int, float)) and math.isfinite(price):
         lines.append(f"Price: ₹{price:,.2f} as of {meta.get('price_time') or meta.get('price_date') or 'unknown'}")

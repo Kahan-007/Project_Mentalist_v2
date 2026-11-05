@@ -208,7 +208,8 @@ def start():
         news_alerts.apply_pending_filter(cfg)
         poll = max(60, float(cfg['monitor']['poll_seconds']))
         # The official RSS declares ttl=5 minutes. Google latency is controlled by its publisher/indexer.
-        jobs = [('news', scan_once, poll), ('nse', scan_nse_once, 300),
+        from . import pairs
+        jobs = [('pairs', pairs.poll, 900), ('news', scan_once, poll), ('nse', scan_nse_once, 300),
                 ('telegram', telegram.poll_once, 1), ('delivery', outbox.flush, 2), ('signals', scan_signals_once, 60)]
         _threads = [threading.Thread(target=_loop, args=j, daemon=True, name='mentalist-'+j[0]) for j in jobs]
         for t in _threads:

@@ -108,7 +108,7 @@ def api_txn(q, body):
     g = lambda k, d: b.get(k) or d   # a blank string from an unused/hidden form field should mean "not given"
     tid = portfolio.add(b["kind"], b["symbol"], b["date"], quantity=g("quantity", 0), price=g("price", 0),
                         fees=g("fees", 0), amount=g("amount", 0), ratio=g("ratio", None),
-                        exchange=g("exchange", "NSE"), note=g("note", ""))
+                        exchange=g("exchange", "NSE"), note=g("note", ""), strategy=b.get("strategy"), pair=b.get("pair"))
     if b["kind"].upper() in ("BUY", "SELL"):
         recommendations.safe_record(b["symbol"], "bought" if b["kind"].upper() == "BUY" else "sold",
                                     note=f"{b['kind'].upper()} {g('quantity', 0)} @ {g('price', 0)} on {b['date']}")
@@ -118,7 +118,7 @@ def api_txn(q, body):
 def api_txn_correct(q, body):
     b = json.loads(body)
     changes = b["changes"]
-    allowed = {"kind", "symbol", "trade_date", "quantity", "price", "fees", "amount", "ratio", "exchange", "note"}
+    allowed = {"kind", "symbol", "trade_date", "quantity", "price", "fees", "amount", "ratio", "exchange", "note", "strategy", "pair"}
     if not isinstance(changes, dict) or set(changes) - allowed:
         raise ValueError("Unsupported transaction correction fields")
     return {"id": portfolio.correct(b["id"], **changes)}
@@ -129,7 +129,13 @@ def api_txn_delete(q, body):
 
 
 def api_import_zerodha(q, body):
-    r = portfolio.import_zerodha_tradebook(body.decode("utf-8-sig"))
+    if q.get('preview'):
+        return portfolio.import_zerodha_tradebook(body.decode("utf-8-sig"),preview=True)
+    if q.get('classified'):
+        packet = json.loads(body)
+        r = portfolio.import_zerodha_tradebook(packet['csv'],purposes=packet['purposes'])
+    else:
+        r = portfolio.import_zerodha_tradebook(body.decode("utf-8-sig"))
     for sym in r["symbols"]:
         recommendations.safe_record(sym, "trades_imported",
                                     note="new trades imported from a Zerodha tradebook; this analysis is as of the "
@@ -195,7 +201,8 @@ def api_stock(q, body):
         try:
             out["score"] = _score(rec)
             r = out['score']
-            if not r['data_quality']['issues'] and not r['provisional'] and r['valuation']['multiple']:
+            if (not r['data_quality']['issues'] and not r['provisional'] and r['valuation']['multiple']
+                    and not any(l.get('strategy') in ('pairs','value') for l in portfolio.holdings().get(sym,{}).get('lots',[]))):
                 r['headroom'] = scoring.price_headroom(rec, None, size_ranks().get(sym), entry=sym not in portfolio.holdings())
             r['sensitivity'] = scoring.sensitivity(rec)
             from . import valuation
@@ -365,7 +372,7 @@ def universe_rows(which="nifty"):
             except Exception as exc:
                 row["error"] = f"{type(exc).__name__}: {exc}"
         if "signal" not in row:
-            row["signal"], row["signal_note"] = recommendations.assess(row["held"], row["shortlisted"], None, st)
+            row["signal"], row["signal_note"] = recommendations.assess(row["held"], row["shortlisted"], None, st, symbol=row["symbol"])
         rows.append(row)
     return rows, st, ranks
 
@@ -584,7 +591,7 @@ def api_scores(q, body):
         base = {"symbol": sym, "shortlisted": sym in sl, "held": sym in pos,
                 "quantity": float(pos[sym]["quantity"]) if sym in pos else None}
         if not rec:
-            s, why = recommendations.assess(sym in pos, sym in sl, None, st)
+            s, why = recommendations.assess(sym in pos, sym in sl, None, st, symbol=sym)
             rows.append({**base, "error": "financials not imported", "signal": s, "signal_note": why})
             continue
         try:
@@ -603,6 +610,7 @@ def api_scores(q, body):
                          "value_multiple": r["valuation"]["multiple"],
                          # price trigger only for your own stocks (it re-scores ~20 times, so not for all 250)
                          "headroom": scoring.price_headroom(rec, st, ranks.get(sym), entry=sym not in pos) if (sym in pos or sym in sl)
+                         and not any(l.get("strategy") in ("pairs","value") for l in pos.get(sym,{}).get("lots",[]))
                          and recommendations.assess(sym in pos, sym in sl, r, st)[0] != 'review' else None})
         except Exception as exc:
             rows.append({**base, "error": f"{type(exc).__name__}: {exc}"})
@@ -889,6 +897,18 @@ def api_risk_limits(q, body):
     return {'saved':True}
 
 
+from . import pairs
+
+def api_pairs(q, body):
+    key = q.get('pair',[''])[0]
+    if not key:
+        return {'catalog': pairs.CATALOG, 'watched': pairs.watched()}
+    if key not in pairs.CATALOG:
+        raise ValueError("Unknown pair")
+    return pairs.inspect(key)
+
+GET['/api/pairs'] = api_pairs
+POST['/api/pair-watch'] = lambda q, body: pairs.watch(**json.loads(body))
 GET['/api/quality'] = api_quality
 POST['/api/feedback'] = api_feedback
 POST['/api/risk-limits'] = api_risk_limits

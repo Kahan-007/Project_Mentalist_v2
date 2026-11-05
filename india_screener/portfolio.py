@@ -84,7 +84,7 @@ _FIELDS = "trade_date,symbol,exchange,kind,quantity,price,fees,amount,ratio_num,
 
 def _rows(db):
     # Preserve historical same-day insertion order; never invent buy-before-sell ordering.
-    return [dict(r) for r in db.execute("SELECT * FROM transactions ORDER BY trade_date, id")]
+    return [dict(r) for r in db.execute("SELECT t.*, s.strategy, s.pair FROM transactions t LEFT JOIN purchase_strategy s ON s.transaction_id=t.id ORDER BY trade_date, id")]
 
 
 def _audit(db, action, txn_id, before=None, after=None):
@@ -98,12 +98,25 @@ def _insert(db, values):
     return cur.lastrowid
 
 
+def _strategy(db, txn_id, kind, symbol, strategy, pair):
+    db.execute("DELETE FROM purchase_strategy WHERE transaction_id=?", (txn_id,))
+    if kind.upper() != 'BUY' or strategy is None:
+        return
+    from .pairs import CATALOG
+    if strategy not in ('value','pairs') or (strategy == 'pairs' and
+            (pair not in CATALOG or symbol.upper() not in CATALOG[pair][:2])):
+        raise LedgerError("Choose a purchase strategy and a pair containing this stock.")
+    db.execute("INSERT INTO purchase_strategy VALUES(?,?,?)",
+               (txn_id, strategy, pair if strategy == 'pairs' else ''))
+
+
 def add(kind, symbol, trade_date, quantity=0, price=0, fees=0, amount=0, ratio=None,
-        exchange="NSE", note="", external_id=None, path=None):
+        exchange="NSE", note="", external_id=None, path=None, strategy=None, pair=None):
     values = _values(kind, symbol, trade_date, quantity, price, fees, amount, ratio, exchange, note, external_id)
     with dbm.connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         new_id = _insert(db, values)
+        _strategy(db, new_id, kind, symbol, strategy, pair)
         _replay(_rows(db))
         return new_id
 
@@ -122,6 +135,8 @@ def delete(txn_id, path=None):
 
 def correct(txn_id, path=None, **changes):
     """Correct in place, preserving same-day order and an audit trail; invalid replay rolls back."""
+    strategy = changes.pop('strategy', None)
+    pair = changes.pop('pair', None)
     allowed = set(_FIELDS.split(',')) - {'ratio_num', 'ratio_den'} | {'ratio'}
     if set(changes) - allowed:
         raise LedgerError("unsupported transaction fields")
@@ -134,6 +149,10 @@ def correct(txn_id, path=None, **changes):
         data['ratio'] = f"{old['ratio_num']}:{old['ratio_den']}"
         data.update(changes)
         values = _values(**data)
+        existing = db.execute("SELECT strategy,pair FROM purchase_strategy WHERE transaction_id=?", (txn_id,)).fetchone()
+        if strategy is None and existing:
+            strategy, pair = existing
+        _strategy(db,txn_id,data['kind'],data['symbol'],strategy,pair)
         db.execute("UPDATE transactions SET " + ','.join(k+'=?' for k in _FIELDS.split(',')) + " WHERE id=?",
                    (*values, int(txn_id)))
         _replay(_rows(db))
@@ -158,7 +177,7 @@ def _replay(rows):
                                           "realised": Decimal(0), "dividends": Decimal(0), "fees": Decimal(0)})
         kind, q, p, f = t["kind"], Decimal(t["quantity"]), Decimal(t["price"]), Decimal(t["fees"])
         if kind == "BUY":
-            s["lots"].append({"date": t["trade_date"], "qty": q, "cost": q * p + f})
+            s["lots"].append({"date": t["trade_date"], "qty": q, "cost": q * p + f, "strategy": t.get("strategy") or "legacy", "pair": t.get("pair")})
             s["fees"] += f
         elif kind == "SELL":
             held = sum(l["qty"] for l in s["lots"])
@@ -210,7 +229,7 @@ def _replay(rows):
                     "avg_cost": (invested / qty) if qty else Decimal(0),
                     "realised": s["realised"], "dividends": s["dividends"], "fees": s["fees"],
                     "first_open_lot": s["lots"][0]["date"] if s["lots"] else None,
-                    "lots": [{"date": l["date"], "qty": l["qty"], "cost_per_share": l["cost"] / l["qty"]} for l in s["lots"]]}
+                    "lots": [{"date": l["date"], "qty": l["qty"], "cost_per_share": l["cost"] / l["qty"], "strategy":l["strategy"], "pair":l["pair"]} for l in s["lots"]]}
     return out
 
 
@@ -218,7 +237,7 @@ def holdings(path=None):
     return {k: v for k, v in positions(path).items() if v["quantity"] > 0}
 
 
-def import_zerodha_tradebook(csv_text, path=None):
+def import_zerodha_tradebook(csv_text, path=None, purposes=None, preview=False):
     """Import a Zerodha Console tradebook CSV (Reports -> Tradebook -> Equity -> download CSV).
     De-duplicated by trade_id, so re-importing overlapping files is safe. Fees are not in the tradebook;
     add them afterwards if you want exact cost (contract notes have them)."""
@@ -234,6 +253,7 @@ def import_zerodha_tradebook(csv_text, path=None):
     rows.sort(key=lambda r: (get(r, "trade_date")[:10],
                              get(r, "order_execution_time") if "order_execution_time" in cols else "",
                              0 if get(r, "trade_type").lower() == "buy" else 1))
+    purchases = {}
     added = skipped = 0
     symbols = set()
     with dbm.connect(path) as db:
@@ -254,8 +274,19 @@ def import_zerodha_tradebook(csv_text, path=None):
                              quantity=get(r, "quantity"), price=get(r, "price"),
                              exchange=(get(r, "exchange") or "NSE") if "exchange" in cols else "NSE",
                              external_id=ext, note="imported from Zerodha tradebook")
-            _insert(db, values)
+            if preview:
+                if values[3] == 'BUY':
+                    purchases[ext] = {'symbol':values[1], 'date':values[0], 'quantity':values[4]}
+                continue
+            txn_id = _insert(db, values)
+            if purposes is not None and values[3] == 'BUY':
+                choice = purposes.get(ext,{})
+                if choice.get('strategy') not in ('value','pairs'):
+                    raise LedgerError("Select the strategy for every imported purchase.")
+                _strategy(db,txn_id,'BUY',values[1],choice['strategy'],choice.get('pair'))
             added += 1
             symbols.add(get(r, "symbol").upper())
         _replay(_rows(db))
+    if preview:
+        return purchases
     return {"added": added, "skipped": skipped, "symbols": sorted(symbols)}

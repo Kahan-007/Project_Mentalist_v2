@@ -150,10 +150,12 @@ def justified_pb_value(m, st):
         return None, "need 3+ years of ROE"
     roe = statistics.median(roes)
     ke = st["risk_free"] + st["equity_premium"] + 0.01      # extra 1% for leverage risk
-    payout = m.get("payout") or 0.0
-    g = min(roe * (1 - payout), m.get("bvps_cagr_5") or roe, ke - 0.02)
+    payout, book_growth = m.get("payout"), m.get("bvps_cagr_5")
+    if payout is None or book_growth is None or not 0 <= payout <= 1 or roe <= 0:
+        return None, "insufficient sustainable ROE, payout or book growth evidence"
+    g = min(roe * (1 - payout), book_growth, st.get("terminal_growth", DEFAULT_SETTINGS["terminal_growth"]), ke - 0.02)
     if roe <= g:
-        return eq[-1], "ROE not above growth; valued at book"
+        return None, "no positive distributable earnings under the assumed growth rate"
     pb = (roe - g) / (ke - g)
     return pb * eq[-1], f"median ROE {pct(roe)}, g {pct(g)}, ke {pct(ke)} -> justified P/B {num(pb)}"
 
@@ -384,6 +386,8 @@ def lynch(m, rec, st, cycle_policy="legacy"):
                  f"price / median EPS of {cycle['observations']} years (current P/E {num(m['pe'], 1)} may reflect a peak); full <=10, zero >=25"),
                C("survive_downturn", "Can survive a downturn", 15, linear(m["interest_cover"], 2.0, 6.0), num(m["interest_cover"]),
                  "interest cover; full >=6x")]
+        if rec["sector_type"] != "general":
+            out.pop()  # Interest is an operating expense for lenders.
     else:
         out = [C("peg", "(Growth + yield) / P/E", 25, linear(ratio, 0.5, 2.0), num(ratio),
                  f"Lynch: 2+ excellent, 1 okay, <1 poor. P/E {num(m['pe'], 1)} on {m.get('pe_basis', 'latest year')}"),

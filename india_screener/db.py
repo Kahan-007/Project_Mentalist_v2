@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _INIT_LOCK = threading.Lock()
 
 SCHEMA = """
@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS transactions(
     external_id TEXT UNIQUE,                -- broker trade id, for de-duplicated imports
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS purchase_strategy(
+ transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+ strategy TEXT NOT NULL, pair TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS news(
     id INTEGER PRIMARY KEY,
