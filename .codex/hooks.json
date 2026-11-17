@@ -10,6 +10,20 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/sync_graphify.py\" --hook",
+            "commandWindows": "py -3 \"$(git rev-parse --show-toplevel)/scripts/sync_graphify.py\" --hook",
+            "timeout": 180,
+            "async": true,
+            "statusMessage": "Refreshing Graphify and checking GitHub"
+          }
+        ]
+      }
     ]
   }
 }

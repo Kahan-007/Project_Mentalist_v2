@@ -4,6 +4,8 @@ This project has a knowledge graph at graphify-out/ with god nodes, community st
 
 When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
 
+The Codex `Stop` hook runs `scripts/sync_graphify.py` after each completed turn once the hook is trusted. It refreshes the local working graph and checks the GitHub `graphify-snapshot` branch. The snapshot uses only code already on `india-screener-full-project`. It publishes a new graph when that source commit changes.
+
 Rules:
 - When `graphify-out/graph.json` exists, use Graphify before your first grep, search or source-file read for a codebase question, and include this rule in every subagent prompt that explores code. With the CLI available, use `graphify query "<question>"`, `graphify path "<A>" "<B>"` for relationships, or `graphify explain "<concept>"` for focused concepts. If the CLI is unavailable, read `graphify-out/graph.json` directly. Find relevant node labels, follow their links, and use their source locations to guide targeted source reads. Verify the relevant details in source.
 - Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
