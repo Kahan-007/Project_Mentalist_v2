@@ -9,3 +9,5 @@ run_daily.cmd
 .env
 .env.*
 !.env.example
+
+graphify-out/
